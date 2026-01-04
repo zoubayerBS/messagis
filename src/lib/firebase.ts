@@ -13,8 +13,18 @@ const firebaseConfig = {
     appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID,
 };
 
-// Initialize Firebase
-const app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
+// Initialize Firebase only if we have at least an API key, to prevent build-time crashes
+let app;
+if (getApps().length > 0) {
+    app = getApp();
+} else if (firebaseConfig.apiKey) {
+    app = initializeApp(firebaseConfig);
+} else {
+    // During build, environment variables might be missing. 
+    // We create a dummy app or handle it gracefully.
+    console.warn("Firebase config is incomplete. Firebase will not be initialized.");
+    app = {} as any;
+}
 
 export const auth = getAuth(app);
 export const db = getFirestore(app);
