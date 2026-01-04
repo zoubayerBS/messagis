@@ -107,7 +107,7 @@ export default function SignupPage() {
                                 value={email}
                                 onChange={(e) => setEmail(e.target.value)}
                                 required
-                                className="w-full border-b-2 border-gray-100 py-2 text-[16px] font-bold outline-none focus:border-[#fffc00] transition-all"
+                                className="w-full border-b-2 border-gray-100 py-2 text-[16px] font-bold text-black outline-none focus:border-[#fffc00] transition-all"
                             />
                         </div>
                         <div className="group space-y-1">
@@ -117,7 +117,7 @@ export default function SignupPage() {
                                 value={password}
                                 onChange={(e) => setPassword(e.target.value)}
                                 required
-                                className="w-full border-b-2 border-gray-100 py-2 text-[16px] font-bold outline-none focus:border-[#fffc00] transition-all"
+                                className="w-full border-b-2 border-gray-100 py-2 text-[16px] font-bold text-black outline-none focus:border-[#fffc00] transition-all"
                             />
                         </div>
                         <div className="group space-y-1">
@@ -127,7 +127,7 @@ export default function SignupPage() {
                                 value={confirmPassword}
                                 onChange={(e) => setConfirmPassword(e.target.value)}
                                 required
-                                className="w-full border-b-2 border-gray-100 py-2 text-[16px] font-bold outline-none focus:border-[#fffc00] transition-all"
+                                className="w-full border-b-2 border-gray-100 py-2 text-[16px] font-bold text-black outline-none focus:border-[#fffc00] transition-all"
                             />
                         </div>
                         <button
