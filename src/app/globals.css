@@ -6,10 +6,11 @@
 }
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --font-sans: var(--font-roboto);
+  --color-snapchat-yellow: #FFFC00;
+  --color-snapchat-blue: #00B9FF;
+  --color-snapchat-red: #FF0049;
+  --color-snapchat-purple: #9B38FF;
 }
 
 @media (prefers-color-scheme: dark) {

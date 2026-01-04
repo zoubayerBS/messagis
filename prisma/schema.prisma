@@ -1,0 +1,88 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+
+}
+
+model User {
+  id        String    @id @default(cuid())
+  email     String    @unique
+  uid       String    @unique // Firebase UID
+  username  String?   @unique
+  coupleId  String?
+  couple    Couple?   @relation(fields: [coupleId], references: [id])
+  sentMessages      Message[] @relation("SentMessages")
+  receivedMessages  Message[] @relation("ReceivedMessages")
+  
+  reactions Reaction[]
+  chatSettings ChatSettings[]
+  fcmToken  String?
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+}
+
+model Couple {
+  id        String    @id @default(cuid())
+  name      String?
+  users     User[]
+  messages  Message[]
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+}
+
+model Message {
+  id                String   @id @default(uuid())
+  content           String   // Text or URL (audio/image)
+  type              String   // "text", "audio", "image"
+  timestamp         DateTime @default(now())
+  read              Boolean  @default(false)
+  isSelfDestructing Boolean  @default(true)
+  isDeleted         Boolean  @default(false)
+  isEdited          Boolean  @default(false)
+  reactions         Reaction[]
+  
+  senderId          String
+  sender            User     @relation("SentMessages", fields: [senderId], references: [uid])
+  
+  receiverId        String?
+  receiver          User?    @relation("ReceivedMessages", fields: [receiverId], references: [uid])
+  
+  coupleId          String?
+  couple            Couple?  @relation(fields: [coupleId], references: [id])
+
+  @@index([senderId, receiverId])
+  @@index([coupleId])
+}
+
+model Reaction {
+  id String @id @default(cuid())
+  emoji String
+  userId String
+  messageId String
+  createdAt DateTime @default(now())
+  
+  user User @relation(fields: [userId], references: [uid])
+  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  
+  @@unique([userId, messageId])
+}
+
+model ChatSettings {
+  id String @id @default(cuid())
+  userId String
+  partnerId String
+  isArchived Boolean @default(false)
+  isPinned Boolean @default(false)
+  lastCleared DateTime?
+  
+  user User @relation(fields: [userId], references: [uid])
+  
+  @@unique([userId, partnerId])
+}
