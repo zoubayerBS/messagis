@@ -14,7 +14,7 @@ export default function Home() {
       if (!user) {
         router.push("/login");
       } else {
-        router.push("/chat");
+        router.push("/chat-list");
       }
     }
   }, [user, loading, router]);

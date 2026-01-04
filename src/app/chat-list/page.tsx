@@ -66,7 +66,7 @@ export default function ChatListPage() {
         };
     }, [user]);
 
-    // Fetch and Poll Recent Chats
+    // Fetch and sync Recent Chats in real-time
     useEffect(() => {
         if (!user) return;
 
@@ -78,9 +78,25 @@ export default function ChatListPage() {
             setLoading(false);
         };
 
+        // Initial fetch
         fetchChats();
-        const interval = setInterval(fetchChats, 2000); // Poll every 2s
-        return () => clearInterval(interval);
+
+        // Real-time listener via user-specific signal
+        const signalRef = doc(db, "userSignals", user.uid);
+        const unsubscribe = onSnapshot(signalRef, (docSnap) => {
+            if (docSnap.exists()) {
+                console.log("Chat list update signal received, refreshing...");
+                fetchChats();
+            }
+        });
+
+        // Backup polling (every 15s)
+        const backupInterval = setInterval(fetchChats, 15000);
+
+        return () => {
+            unsubscribe();
+            clearInterval(backupInterval);
+        };
     }, [user]);
 
     const getStatusIcon = (chat: any) => {

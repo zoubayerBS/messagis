@@ -2,7 +2,7 @@
 
 import { prisma } from '@/lib/prisma'
 import { revalidatePath, unstable_noStore as noStore } from 'next/cache'
-import { adminMessaging } from '@/lib/firebase-admin'
+import { adminMessaging, adminDb } from '@/lib/firebase-admin'
 
 export async function sendMessage(data: {
     content: string
@@ -24,6 +24,34 @@ export async function sendMessage(data: {
                 // We leave coupleId null or optionnal
             },
         })
+
+        // -- Real-Time Signaling --
+        try {
+            if (adminDb) {
+                const chatId = [data.senderId, data.receiverId].sort().join('_');
+                const now = new Date().toISOString();
+
+                // Signal for the specific chat
+                await adminDb.collection('chatSignals').doc(chatId).set({
+                    lastMessageAt: now,
+                    lastSenderId: data.senderId
+                }, { merge: true });
+
+                // Signal for the receivers chat list
+                await adminDb.collection('userSignals').doc(data.receiverId).set({
+                    lastUpdateAt: now
+                }, { merge: true });
+
+                // Signal for the senders chat list (to update own status/preview)
+                await adminDb.collection('userSignals').doc(data.senderId).set({
+                    lastUpdateAt: now
+                }, { merge: true });
+
+                console.log("Real-time signals sent via Firestore");
+            }
+        } catch (signalError) {
+            console.error('Error sending real-time signals:', signalError);
+        }
 
         // -- Push Notification Logic --
         try {

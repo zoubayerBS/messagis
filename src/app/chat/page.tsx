@@ -207,27 +207,16 @@ export default function ChatPage() {
         fetchPartner();
     }, [targetUserId]);
 
-    // Load history (Direct Message)
+    // Load and Sync Messages (Direct Message)
     useEffect(() => {
         if (!user || !targetUserId) return;
 
-        const loadHistory = async () => {
+        const syncMessages = async () => {
             const res = await getMessagesAction(user.uid, targetUserId);
             if (res.success && res.messages) {
                 setMessages(res.messages as any[]);
                 setLastFetchTime(new Date());
-            }
-        };
-        loadHistory();
-    }, [user, targetUserId]);
 
-    // Polling
-    useEffect(() => {
-        if (!user || !targetUserId) return;
-        const pollMessages = async () => {
-            const res = await getMessagesAction(user.uid, targetUserId);
-            if (res.success && res.messages) {
-                setMessages(res.messages as any[]);
                 // Mark as read if we have unread messages from this partner
                 const hasUnread = res.messages.some((m: any) => m.senderId === targetUserId && !m.read);
                 if (hasUnread) {
@@ -235,9 +224,28 @@ export default function ChatPage() {
                 }
             }
         };
-        pollMessages(); // Initial call
-        const interval = setInterval(pollMessages, 1000);
-        return () => clearInterval(interval);
+
+        // Initial load
+        syncMessages();
+
+        // Real-time listener via Firestore signal
+        const chatId = [user.uid, targetUserId].sort().join('_');
+        const signalRef = doc(db, "chatSignals", chatId);
+
+        const unsubscribe = onSnapshot(signalRef, (docSnap) => {
+            if (docSnap.exists()) {
+                console.log("New message signal received, refreshing...");
+                syncMessages();
+            }
+        });
+
+        // Backup polling (less frequent, every 10s) just in case
+        const backupInterval = setInterval(syncMessages, 10000);
+
+        return () => {
+            unsubscribe();
+            clearInterval(backupInterval);
+        };
     }, [user, targetUserId]);
 
     useEffect(() => {

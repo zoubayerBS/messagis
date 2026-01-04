@@ -45,7 +45,7 @@ export default function SignupPage() {
                 coupleId: null
             });
 
-            router.push("/onboarding");
+            router.push("/chat-list");
         } catch (err: any) {
             if (err.code === "auth/email-already-in-use") {
                 setError("Cet email est déjà utilisé.");
