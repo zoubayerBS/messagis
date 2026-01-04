@@ -19,8 +19,8 @@ messaging.onBackgroundMessage((payload) => {
     const notificationTitle = payload.notification?.title || "Nouveau message";
     const notificationOptions = {
         body: payload.notification?.body || "Vous avez reçu un nouveau message sur Messagis.",
-        icon: '/icons/icon-192x192.png',
-        badge: '/icons/icon-192x192.png',
+        icon: '/icons/icon-192x192.jpg',
+        badge: '/icons/icon-192x192.jpg',
         data: payload.data, // This contains senderId and click_action
         vibrate: [200, 100, 200],
         tag: 'messagis-notification' // Prevent multiple notifications for the same app
