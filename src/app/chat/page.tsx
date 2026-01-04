@@ -86,6 +86,7 @@ export default function ChatPage() {
     const [showHeaderMenu, setShowHeaderMenu] = useState(false);
     const [chatSettings, setChatSettings] = useState<any>(null);
     const [lastFetchTime, setLastFetchTime] = useState<Date>(new Date());
+    const [selectedImage, setSelectedImage] = useState<string | null>(null);
 
 
 
@@ -504,7 +505,12 @@ export default function ChatPage() {
                                                             ) : msg.isSelfDestructing && msg.read ? (
                                                                 <div className="px-4 py-2 text-xs italic opacity-40">Photo expirée</div>
                                                             ) : (
-                                                                <img src={msg.content} alt="Shared" className="rounded-[15px] max-h-64 w-full object-cover" />
+                                                                <img
+                                                                    src={msg.content}
+                                                                    alt="Shared"
+                                                                    className="rounded-[15px] max-h-64 w-full object-cover cursor-pointer hover:opacity-90 transition-opacity"
+                                                                    onClick={() => setSelectedImage(msg.content)}
+                                                                />
                                                             )}
                                                         </div>
                                                     )}
@@ -601,6 +607,38 @@ export default function ChatPage() {
                     </form>
                 </div>
             </div>
+
+            {/* Image Zoom Modal */}
+            <AnimatePresence>
+                {selectedImage && (
+                    <motion.div
+                        initial={{ opacity: 0 }}
+                        animate={{ opacity: 1 }}
+                        exit={{ opacity: 0 }}
+                        onClick={() => setSelectedImage(null)}
+                        className="fixed inset-0 z-[100] bg-black/90 flex items-center justify-center p-4 backdrop-blur-sm"
+                    >
+                        <motion.button
+                            initial={{ scale: 0.5, opacity: 0 }}
+                            animate={{ scale: 1, opacity: 1 }}
+                            className="absolute top-6 right-6 p-2 bg-white/10 hover:bg-white/20 rounded-full text-white transition-colors"
+                            onClick={() => setSelectedImage(null)}
+                        >
+                            <X className="w-8 h-8" />
+                        </motion.button>
+
+                        <motion.img
+                            initial={{ scale: 0.8, opacity: 0 }}
+                            animate={{ scale: 1, opacity: 1 }}
+                            exit={{ scale: 0.8, opacity: 0 }}
+                            src={selectedImage}
+                            alt="Full Preview"
+                            className="max-w-full max-h-[90vh] rounded-2xl shadow-2xl object-contain"
+                            onClick={(e) => e.stopPropagation()}
+                        />
+                    </motion.div>
+                )}
+            </AnimatePresence>
         </ProtectedRoute>
     );
 }
