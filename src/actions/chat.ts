@@ -5,6 +5,8 @@ import { revalidatePath, unstable_noStore as noStore } from 'next/cache'
 import { adminMessaging, adminDb } from '@/lib/firebase-admin'
 import { getIO } from '@/lib/socket-io'
 
+import { randomUUID } from 'crypto'
+
 export async function sendMessage(data: {
     content: string
     type: string
@@ -14,33 +16,56 @@ export async function sendMessage(data: {
     coupleId?: string // Optional, backward compatibility or ignore
 }) {
     try {
+        // 1. Pre-generate ID and construct message object primarily for Socket emission
+        const messageId = randomUUID();
+        const now = new Date();
+
+        // This object must match the shape expected by the client and Prisma
+        const messagePayload = {
+            id: messageId,
+            content: data.content,
+            type: data.type,
+            senderId: data.senderId,
+            receiverId: data.receiverId,
+            isSelfDestructing: data.isSelfDestructing ?? true,
+            read: false,
+            timestamp: now,
+            isDeleted: false,
+            isEdited: false,
+            coupleId: data.coupleId || null,
+            reactions: [] // Initial empty reactions
+        };
+
+        // 2. Emit Socket.io Signal IMMEDIATELY (Before DB)
+        try {
+            const io = getIO();
+            if (io) {
+                // Emit to both sender and receiver immediately for instant UI update
+                io.to(data.receiverId).emit('new_message', messagePayload);
+                io.to(data.senderId).emit('new_message', messagePayload);
+                console.log("Socket.io signal sent IMMEDIATELY (Pre-DB) for message:", messageId);
+            }
+        } catch (socketError) {
+            console.error('Error sending immediate socket signal:', socketError);
+        }
+
+        // 3. Persist to Database (Asynchronously waited)
         const message = await prisma.message.create({
             data: {
+                id: messageId, // Use the pre-generated ID
                 content: data.content,
                 type: data.type,
                 senderId: data.senderId,
                 receiverId: data.receiverId,
                 isSelfDestructing: data.isSelfDestructing ?? true,
                 read: false,
+                timestamp: now,
                 // We leave coupleId null or optionnal
             },
             include: {
                 reactions: true
             }
         })
-
-        // -- Socket.io Signaling (Immediate Real-time) --
-        try {
-            const io = getIO();
-            if (io) {
-                // Emit to both sender and receiver immediately for instant UI update
-                io.to(data.receiverId).emit('new_message', message);
-                io.to(data.senderId).emit('new_message', message);
-                console.log("Socket.io signal sent immediately for message:", message.id);
-            }
-        } catch (socketError) {
-            console.error('Error sending socket signal:', socketError);
-        }
 
         // -- Real-Time Signals (Firestore) --
         try {

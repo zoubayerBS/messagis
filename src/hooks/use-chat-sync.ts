@@ -75,6 +75,19 @@ export function useChatSync(userId: string | undefined, partnerId: string | null
         partnerIdRef.current = partnerId;
     }, [partnerId]);
 
+    // Resync on window focus (mini-resync)
+    useEffect(() => {
+        const handleFocus = () => {
+            if (!userId) return;
+            console.log('[useChatSync] Window focused, syncing...');
+            if (partnerIdRef.current) syncMessages();
+            syncChats();
+        };
+
+        window.addEventListener('focus', handleFocus);
+        return () => window.removeEventListener('focus', handleFocus);
+    }, [userId, syncMessages, syncChats]);
+
     useEffect(() => {
         if (!userId) return;
 
