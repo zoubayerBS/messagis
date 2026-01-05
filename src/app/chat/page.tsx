@@ -71,7 +71,7 @@ export default function ChatPage() {
     const { user } = useAuth();
     const router = useRouter();
     const searchParams = useSearchParams();
-    const targetUserId = searchParams.get('uid');
+    const targetUserId = searchParams?.get('uid');
 
     // Use the sync hook
     const { toastData, closeToast } = useChatSync(user?.uid, targetUserId);
