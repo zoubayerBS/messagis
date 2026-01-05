@@ -106,10 +106,41 @@ export function useChatSync(userId: string | undefined, partnerId: string | null
         const handleNewMessage = async (message: any) => {
             console.log('[useChatSync] New message received via socket:', message);
 
-            // 1. Save to local messages (LiveQuery will pick this up instantly)
-            await db.messages.put({
-                ...message,
-                timestamp: message.timestamp && !isNaN(new Date(message.timestamp).getTime()) ? new Date(message.timestamp) : new Date(),
+            // 1. Deduplication Logic
+            await db.transaction('rw', db.messages, async () => {
+                // Check if this specific message ID already exists (Update case)
+                const existingReal = await db.messages.get(message.id);
+                if (existingReal) {
+                    await db.messages.put({
+                        ...message,
+                        timestamp: message.timestamp && !isNaN(new Date(message.timestamp).getTime()) ? new Date(message.timestamp) : new Date(),
+                    });
+                    return;
+                }
+
+                // If sent by me, check for any "local-" message with same content/recipient
+                // that was created recently (within last 10 seconds)
+                if (message.senderId === userId) {
+                    const recentLocal = await db.messages
+                        .where('senderId').equals(userId)
+                        .filter(m =>
+                            m.id.startsWith('local-') &&
+                            m.content === message.content &&
+                            m.receiverId === message.receiverId &&
+                            Math.abs(new Date().getTime() - new Date(m.timestamp).getTime()) < 10000
+                        )
+                        .first();
+
+                    if (recentLocal) {
+                        console.log('[useChatSync] Replaced optimistic message:', recentLocal.id, 'with real:', message.id);
+                        await db.messages.delete(recentLocal.id);
+                    }
+                }
+
+                await db.messages.put({
+                    ...message,
+                    timestamp: message.timestamp && !isNaN(new Date(message.timestamp).getTime()) ? new Date(message.timestamp) : new Date(),
+                });
             });
 
             // 2. Update chat preview in Dexie

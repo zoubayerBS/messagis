@@ -269,9 +269,9 @@ export default function ChatPage() {
         setDoc(doc(firestore, "status", user.uid), { isTyping: false }, { merge: true });
 
         try {
-            // Optimistic update to IndexedDB
+            const tempId = `local-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
             const optimisticMsg = {
-                id: `local-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
+                id: tempId,
                 content,
                 type: "text" as const,
                 senderId: user.uid,
@@ -293,12 +293,22 @@ export default function ChatPage() {
                 isSelfDestructing: isSelfDestructNext
             });
 
-            if (!res.success) {
+            if (res.success && res.message) {
+                // Replace optimistic message with real message from server
+                await localDb.transaction('rw', localDb.messages, async () => {
+                    await localDb.messages.delete(tempId);
+                    await localDb.messages.put({
+                        ...res.message,
+                        timestamp: new Date(res.message.timestamp) // Ensure Date object
+                    });
+                });
+            } else {
                 console.error("Failed to save to Prisma:", res.error);
-                // Optionally remove optimistic message or mark as failed
+                // Optionally mark as failed/retry here
             }
         } catch (err) {
             console.error("Prisma action error:", err);
+            // Optionally remove optimistic message on error implies failure
         }
 
         setIsSelfDestructNext(false);
