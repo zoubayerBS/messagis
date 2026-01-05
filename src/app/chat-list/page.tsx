@@ -328,6 +328,7 @@ export default function ChatListPage() {
                                                     lastMessageTimestamp: new Date(),
                                                     lastMessageSenderId: user?.uid || "",
                                                     lastMessageRead: true,
+                                                    lastMessageType: "text",
                                                     unreadCount: 0,
                                                     isPinned: false,
                                                     isArchived: false,
