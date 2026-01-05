@@ -303,6 +303,7 @@ export default function ChatPage() {
                         timestamp: new Date(res.message.timestamp), // Ensure Date object
                         reactions: res.message.reactions || [],
                         receiverId: res.message.receiverId || targetUserId || "", // Ensure string
+                        type: res.message.type as "text" | "image" | "audio",
                     });
                 });
             } else {
