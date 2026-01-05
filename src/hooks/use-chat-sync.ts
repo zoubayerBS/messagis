@@ -76,10 +76,24 @@ export function useChatSync(userId: string | undefined, partnerId: string | null
         // Trigger explicit socket initialization API route
         fetch('/api/socket');
 
-        socket.on('connect', () => {
-            console.log('Socket connected, joining room:', userId);
+        const handleConnect = () => {
+            console.log('Socket connected/reconnected, joining room:', userId);
             socket.emit('join', userId);
-        });
+            // Re-sync messages on connection to catch up
+            if (partnerId) syncMessages();
+            syncChats();
+        };
+
+        const handleReconnect = (attempt: number) => {
+            console.log('Socket reconnected after attempt:', attempt);
+            // Re-join logic is often auto-handled by socket.io if local, but we explicitly re-join room to be safe
+            socket.emit('join', userId);
+            if (partnerId) syncMessages();
+            syncChats();
+        };
+
+        socket.on('connect', handleConnect);
+        socket.on('reconnect', handleReconnect); // Built-in event
 
         socket.on('new_message', async (message: any) => {
             console.log('New message received via socket:', message);
@@ -124,20 +138,11 @@ export function useChatSync(userId: string | undefined, partnerId: string | null
         });
 
         return () => {
+            socket.off('connect', handleConnect);
+            socket.off('reconnect', handleReconnect);
             socket.off('new_message');
-            socket.off('connect');
         };
-    }, [userId, partnerId]);
-
-    // Initial sync
-    useEffect(() => {
-        if (userId) {
-            syncChats();
-            if (partnerId) {
-                syncMessages();
-            }
-        }
-    }, [userId, partnerId, syncMessages, syncChats]);
+    }, [userId, partnerId, syncChats, syncMessages]);
 
     return {
         syncMessages,
