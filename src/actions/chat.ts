@@ -26,7 +26,20 @@ export async function sendMessage(data: {
             },
         })
 
-        // -- Real-Time Signaling --
+        // -- Socket.io Signaling (Immediate Real-time) --
+        try {
+            const io = getIO();
+            if (io) {
+                // Emit to both sender and receiver immediately for instant UI update
+                io.to(data.receiverId).emit('new_message', message);
+                io.to(data.senderId).emit('new_message', message);
+                console.log("Socket.io signal sent immediately for message:", message.id);
+            }
+        } catch (socketError) {
+            console.error('Error sending socket signal:', socketError);
+        }
+
+        // -- Real-Time Signals (Firestore) --
         try {
             if (adminDb) {
                 const chatId = [data.senderId, data.receiverId].sort().join('_');
@@ -116,18 +129,6 @@ export async function sendMessage(data: {
         } catch (pushError) {
             console.error('Error sending push notification:', pushError);
             // Don't fail the message if push fails
-        }
-
-        // -- Socket.io Signaling --
-        try {
-            const io = getIO();
-            if (io) {
-                io.to(data.receiverId).emit('new_message', message);
-                io.to(data.senderId).emit('new_message', message);
-                console.log("Socket.io signal sent for message:", message.id);
-            }
-        } catch (socketError) {
-            console.error('Error sending socket signal:', socketError);
         }
 
         revalidatePath('/chat')
