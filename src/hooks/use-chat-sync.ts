@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useCallback, useState } from 'react';
+import { useEffect, useCallback, useState, useRef } from 'react';
 import { db } from '@/lib/db';
 import { getSocket } from '@/lib/socket-client';
 import { getMessages, getRecentChats } from '@/actions/chat';
@@ -68,6 +68,13 @@ export function useChatSync(userId: string | undefined, partnerId: string | null
         }
     }, [userId]);
 
+    // Use refs for stable access in socket callbacks without triggering effect re-runs
+    const partnerIdRef = useRef(partnerId);
+
+    useEffect(() => {
+        partnerIdRef.current = partnerId;
+    }, [partnerId]);
+
     useEffect(() => {
         if (!userId) return;
 
@@ -76,29 +83,30 @@ export function useChatSync(userId: string | undefined, partnerId: string | null
         // Trigger explicit socket initialization API route
         fetch('/api/socket');
 
-        const handleConnect = () => {
-            console.log('Socket connected/reconnected, joining room:', userId);
+        const joinRoom = () => {
+            console.log('[useChatSync] Joining room:', userId);
             socket.emit('join', userId);
+        };
+
+        const handleConnect = () => {
+            console.log('[useChatSync] Socket connected, joining room...');
+            joinRoom();
             // Re-sync messages on connection to catch up
-            if (partnerId) syncMessages();
+            if (partnerIdRef.current) syncMessages();
             syncChats();
         };
 
         const handleReconnect = (attempt: number) => {
-            console.log('Socket reconnected after attempt:', attempt);
-            // Re-join logic is often auto-handled by socket.io if local, but we explicitly re-join room to be safe
-            socket.emit('join', userId);
-            if (partnerId) syncMessages();
+            console.log('[useChatSync] Socket reconnected after attempt:', attempt);
+            joinRoom();
+            if (partnerIdRef.current) syncMessages();
             syncChats();
         };
 
-        socket.on('connect', handleConnect);
-        socket.on('reconnect', handleReconnect); // Built-in event
+        const handleNewMessage = async (message: any) => {
+            console.log('[useChatSync] New message received via socket:', message);
 
-        socket.on('new_message', async (message: any) => {
-            console.log('New message received via socket:', message);
-
-            // 1. Save to local messages
+            // 1. Save to local messages (LiveQuery will pick this up instantly)
             await db.messages.put({
                 ...message,
                 timestamp: message.timestamp && !isNaN(new Date(message.timestamp).getTime()) ? new Date(message.timestamp) : new Date(),
@@ -112,13 +120,15 @@ export function useChatSync(userId: string | undefined, partnerId: string | null
                 lastMessageSenderId: message.senderId,
                 lastMessageRead: message.read,
                 lastMessageType: message.type,
-                unreadCount: message.senderId === userId ? 0 : 1,
+                unreadCount: message.senderId === userId ? 0 : 1, // Only increment if message is from partner
                 isPinned: false,
                 isArchived: false,
             });
 
-            // 3. Show Foreground Toast if not in this chat
-            if (message.senderId !== userId && message.senderId !== partnerId) {
+            // 3. Show Foreground Toast only if:
+            // - We are NOT currently looking at this chat (partnerIdRef.current !== senderId)
+            // - The message was not sent by us
+            if (message.senderId !== userId && message.senderId !== partnerIdRef.current) {
                 const notificationBody = message.type === 'text'
                     ? (message.content.length > 50 ? message.content.substring(0, 47) + '...' : message.content)
                     : (message.type === 'image' ? '📷 Photo' : '🎵 Vocal');
@@ -135,14 +145,23 @@ export function useChatSync(userId: string | undefined, partnerId: string | null
                     setToastData(prev => ({ ...prev, show: false }));
                 }, 5000);
             }
-        });
+        };
+
+        // If socket is already connected when this effect mounts, ensure we join
+        if (socket.connected) {
+            joinRoom();
+        }
+
+        socket.on('connect', handleConnect);
+        socket.on('reconnect', handleReconnect);
+        socket.on('new_message', handleNewMessage);
 
         return () => {
             socket.off('connect', handleConnect);
             socket.off('reconnect', handleReconnect);
-            socket.off('new_message');
+            socket.off('new_message', handleNewMessage);
         };
-    }, [userId, partnerId, syncChats, syncMessages]);
+    }, [userId]); // Removed partnerId, syncChats, syncMessages from dependencies
 
     return {
         syncMessages,
