@@ -65,10 +65,16 @@ const ioHandler = (req: NextApiRequest, res: NextApiResponseServerIO) => {
         });
 
         res.socket.server.io = io;
-        setIO(io);
     } else {
         console.log('socket.io already running');
     }
+
+    // key fix: Always update the global IO reference, 
+    // because HMR might have cleared the module's global.io while the server.io persists.
+    if (res.socket.server.io) {
+        setIO(res.socket.server.io);
+    }
+
     res.end();
 };
 
