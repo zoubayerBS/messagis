@@ -2,9 +2,7 @@
 
 import { prisma } from '@/lib/prisma'
 import { revalidatePath, unstable_noStore as noStore } from 'next/cache'
-import { adminMessaging, adminDb } from '@/lib/firebase-admin'
-import { getIO } from '@/lib/socket-io'
-
+import { adminMessaging } from '@/lib/firebase-admin'
 import { randomUUID } from 'crypto'
 
 export async function sendMessage(data: {
@@ -16,7 +14,7 @@ export async function sendMessage(data: {
     coupleId?: string // Optional, backward compatibility or ignore
 }) {
     try {
-        // 1. Pre-generate ID and construct message object primarily for Socket emission
+        // 1. Pre-generate ID and construct message object primarily for Ably emission
         const messageId = randomUUID();
         const now = new Date();
 
@@ -36,23 +34,10 @@ export async function sendMessage(data: {
             reactions: [] // Initial empty reactions
         };
 
-        // 2. Emit Socket.io Signal IMMEDIATELY (Before DB)
-        try {
-            const io = getIO();
-            if (io) {
-                // Emit to both sender and receiver immediately for instant UI update
-                io.to(data.receiverId).emit('new_message', messagePayload);
-                io.to(data.senderId).emit('new_message', messagePayload);
-                console.log("Socket.io signal sent IMMEDIATELY (Pre-DB) for message:", messageId);
-            }
-        } catch (socketError) {
-            console.error('Error sending immediate socket signal:', socketError);
-        }
-
-        // 3. Persist to Database (Asynchronously waited)
+        // 2. Persist to Database FIRST to avoid race condition
         const message = await prisma.message.create({
             data: {
-                id: messageId, // Use the pre-generated ID
+                id: messageId,
                 content: data.content,
                 type: data.type,
                 senderId: data.senderId,
@@ -60,44 +45,55 @@ export async function sendMessage(data: {
                 isSelfDestructing: data.isSelfDestructing ?? true,
                 read: false,
                 timestamp: now,
-                // We leave coupleId null or optionnal
             },
             include: {
                 reactions: true
             }
         })
 
-        // -- Real-Time Signals (Firestore) --
+        // 3. Emit Ably Signal AFTER DB
         try {
-            if (adminDb) {
-                const chatId = [data.senderId, data.receiverId].sort().join('_');
-                const now = new Date().toISOString();
+            if (process.env.ABLY_API_KEY) {
+                const Ably = require('ably');
+                const ably = new Ably.Rest(process.env.ABLY_API_KEY);
 
-                // Signal for the specific chat
-                await adminDb.collection('chatSignals').doc(chatId).set({
-                    lastMessageAt: now,
-                    lastSenderId: data.senderId
-                }, { merge: true });
+                // Fetch sender details for the signal metadata
+                const senderObj = await prisma.user.findUnique({
+                    where: { uid: data.senderId },
+                    select: { username: true, email: true }
+                });
 
-                // Signal for the receivers chat list
-                await adminDb.collection('userSignals').doc(data.receiverId).set({
-                    lastUpdateAt: now
-                }, { merge: true });
+                // OPTIMIZATION: Pull-based delivery for non-text messages
+                let transportPayload = {
+                    ...messagePayload,
+                    senderUsername: senderObj?.username,
+                    senderEmail: senderObj?.email
+                };
+                if (data.type !== 'text') {
+                    // Omit content for media to avoid Ably/FCM limits. Client will fetch via getMessageById.
+                    transportPayload.content = "";
+                    (transportPayload as any).fetchFullContent = true;
+                    console.log(`[Ably] Signal only (Pull-based) for media message: ${messageId}`);
+                }
 
-                // Signal for the senders chat list (to update own status/preview)
-                await adminDb.collection('userSignals').doc(data.senderId).set({
-                    lastUpdateAt: now
-                }, { merge: true });
+                // Publish to recipient's personal channel
+                const receiverChannel = ably.channels.get(`user:${data.receiverId}`);
+                await receiverChannel.publish('new_message', transportPayload);
 
-                console.log("Real-time signals sent via Firestore");
+                // Publish to sender's personal channel (for other devices)
+                const senderChannel = ably.channels.get(`user:${data.senderId}`);
+                await senderChannel.publish('new_message', transportPayload);
+
+                console.log("Ably signal sent AFTER DB for message:", messageId);
+            } else {
+                console.warn("[Action:sendMessage] WARNING: ABLY_API_KEY not found. Real-time update skipped.");
             }
-        } catch (signalError) {
-            console.error('Error sending real-time signals:', signalError);
+        } catch (ablyError) {
+            console.error('Error sending immediate Ably signal:', ablyError);
         }
 
         // -- Push Notification Logic --
         try {
-            console.log("Push Notification Logic started for recipient:", data.receiverId);
             const recipient = await prisma.user.findUnique({
                 where: { uid: data.receiverId },
                 select: { fcmToken: true }
@@ -108,12 +104,8 @@ export async function sendMessage(data: {
                 select: { username: true, email: true }
             });
 
-            console.log("Recipient token found:", recipient?.fcmToken ? "Yes" : "No");
-
             if (recipient?.fcmToken && adminMessaging) {
                 const senderDisplay = sender?.username || sender?.email?.split('@')[0] || "Messagis";
-                console.log("Sending push notification via adminMessaging...");
-
                 let notificationBody = 'Nouveau message reçu 👻';
                 if (data.type === 'text') {
                     notificationBody = data.content.length > 100 ? data.content.substring(0, 97) + '...' : data.content;
@@ -123,39 +115,35 @@ export async function sendMessage(data: {
                     notificationBody = '🎵 Message vocal reçu';
                 }
 
-                const response = await adminMessaging.send({
+                await adminMessaging.send({
                     token: recipient.fcmToken,
-                    // We REMOVE the 'notification' key so the browser doesn't auto-show it.
-                    // Instead, we pass everything in 'data' for the Service Worker to handle.
                     data: {
                         title: senderDisplay,
                         body: notificationBody,
                         senderId: data.senderId,
+                        receiverId: data.receiverId,
                         type: data.type,
+                        // Content is omitted for media to avoid 4KB FCM limit. Client will fetch.
+                        content: data.type === 'text' ? data.content : "",
+                        id: messageId,
+                        timestamp: now.toISOString(),
                         click_action: `/chat?uid=${data.senderId}`,
                         tag: `msg-${data.senderId}`
                     },
-                    android: {
-                        priority: 'high',
-                        // Notification key removed here too
-                    },
+                    android: { priority: 'high' },
                     apns: {
                         payload: {
                             aps: {
-                                'content-available': 1, // Silent push for iOS equivalent
+                                'content-available': 1,
                                 sound: 'default',
                                 threadId: `msg-${data.senderId}`
                             }
                         }
                     }
                 });
-                console.log("Push notification response:", response);
-            } else {
-                console.log("Skipping push: recipient token missing or adminMessaging not initialized.");
             }
         } catch (pushError) {
             console.error('Error sending push notification:', pushError);
-            // Don't fail the message if push fails
         }
 
         revalidatePath('/chat')
@@ -166,8 +154,28 @@ export async function sendMessage(data: {
     }
 }
 
-export async function getMessages(currentUserId: string, otherUserId: string) {
-    noStore(); // Opt out of static caching for real-time polling
+export async function getMessageById(messageId: string) {
+    try {
+        const message = await prisma.message.findUnique({
+            where: { id: messageId },
+            include: {
+                reactions: {
+                    include: {
+                        user: { select: { uid: true, username: true, email: true } }
+                    }
+                }
+            }
+        });
+        if (!message) return { success: false, error: "Message not found" };
+        return { success: true, message };
+    } catch (error: any) {
+        console.error('Error fetching message by ID:', error);
+        return { success: false, error: error.message || String(error) };
+    }
+}
+
+export async function getMessages(currentUserId: string, otherUserId: string, limit: number = 15, offset: number = 0) {
+    noStore(); // Opt out of static caching
     try {
         const settings = await prisma.chatSettings.findUnique({
             where: { userId_partnerId: { userId: currentUserId, partnerId: otherUserId } }
@@ -182,9 +190,10 @@ export async function getMessages(currentUserId: string, otherUserId: string) {
                 timestamp: settings?.lastCleared ? { gt: settings.lastCleared } : undefined
             },
             orderBy: {
-                timestamp: 'asc',
+                timestamp: 'desc',
             },
-            take: 100, // Limit initial load
+            take: limit,
+            skip: offset,
             include: {
                 reactions: {
                     include: {
@@ -193,7 +202,8 @@ export async function getMessages(currentUserId: string, otherUserId: string) {
                 }
             }
         })
-        return { success: true, messages }
+        // Reverse to return in chronological order for the client
+        return { success: true, messages: messages.reverse() }
     } catch (error: any) {
         console.error('Error fetching messages from Prisma:', error)
         return { success: false, error: error.message || String(error) }
@@ -234,13 +244,8 @@ export async function getRecentChats(currentUserId: string) {
             const partnerId = isMe ? msg.receiverId : msg.senderId;
             const partner = isMe ? msg.receiver : msg.sender;
 
-            if (partnerId && !chatsMap.has(partnerId)) {
-                // Filter out archived if they don't have new messages? 
-                // Plan: Hide archived by default in the main list.
+            if (partnerId && partnerId !== currentUserId && !chatsMap.has(partnerId)) {
                 if (archivedIds.includes(partnerId)) return;
-
-                // Respect lastCleared for the last message display?
-                // For simplicity, just check if msg is older than cleared.
                 const s = settingsList.find((c: any) => c.partnerId === partnerId);
                 if (s?.lastCleared && msg.timestamp <= s.lastCleared) return;
 
@@ -384,7 +389,7 @@ export async function deleteMessage(messageId: string, userId: string) {
             where: { id: messageId },
             data: {
                 isDeleted: true,
-                content: "" // Clear content for privacy
+                content: ""
             }
         });
         revalidatePath('/chat');
@@ -433,19 +438,16 @@ export async function toggleReaction(messageId: string, emoji: string, userId: s
 
         if (existingReaction) {
             if (existingReaction.emoji === emoji) {
-                // Remove if same emoji
                 await prisma.reaction.delete({
                     where: { id: existingReaction.id }
                 });
             } else {
-                // Update if different emoji
                 await prisma.reaction.update({
                     where: { id: existingReaction.id },
                     data: { emoji }
                 });
             }
         } else {
-            // Create new
             await prisma.reaction.create({
                 data: {
                     userId,

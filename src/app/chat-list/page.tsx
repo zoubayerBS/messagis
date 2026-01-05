@@ -3,13 +3,6 @@
 import { useEffect, useState } from "react";
 import { useAuth } from "@/components/AuthProvider";
 import { getRecentChats } from "@/actions/chat";
-import { db as firestore } from "@/lib/firebase";
-import {
-    onSnapshot,
-    doc,
-    setDoc,
-    serverTimestamp
-} from "firebase/firestore";
 import { useLiveQuery } from "dexie-react-hooks";
 import { db as localDb } from "@/lib/db";
 import { useChatSync } from "@/hooks/use-chat-sync";
@@ -26,9 +19,11 @@ import {
     Circle,
     MessageSquareDashed,
     MessageCircleCode,
-    X
+    X,
+    Trash2
 } from "lucide-react";
 import { searchUsers } from "@/actions/user";
+import { clearConversation } from "@/actions/chat";
 import { motion } from "framer-motion";
 import { useRouter } from "next/navigation";
 import { format } from "date-fns";
@@ -61,13 +56,41 @@ export default function ChatListPage() {
         []
     ) || [];
 
-    const [loading, setLoading] = useState(false); // No longer need local loading state for this
+    const [loading, setLoading] = useState(false);
+    const [onlineUserIds, setOnlineUserIds] = useState<Set<string>>(new Set());
 
-    // Sync online status
-    // Sync online status - REPLACED BY Socket.io in useChatSync
-    // Firestore status updates removed.
+    // Sync global presence
+    useEffect(() => {
+        if (!user) return;
+        const ably = require('@/lib/ably').getAbly(user.uid);
+        if (!ably) return;
 
-    // Recent Chats loading and sync is now handled by useChatSync and useLiveQuery
+        const globalChannel = ably.channels.get('global:presence');
+
+        const updatePresence = async () => {
+            const members = await globalChannel.presence.get();
+            const onlineIds = new Set((members as any[]).map(m => m.clientId));
+            setOnlineUserIds(onlineIds);
+        };
+
+        globalChannel.presence.subscribe(['enter', 'leave', 'present'], (msg: any) => {
+            setOnlineUserIds(prev => {
+                const next = new Set(prev);
+                if (msg.action === 'leave') {
+                    next.delete(msg.clientId);
+                } else {
+                    next.add(msg.clientId);
+                }
+                return next;
+            });
+        });
+
+        updatePresence();
+
+        return () => {
+            globalChannel.presence.unsubscribe();
+        };
+    }, [user]);
 
     const getStatusIcon = (chat: any) => {
         const isMe = chat.lastMessageSenderId === user?.uid;
@@ -110,7 +133,6 @@ export default function ChatListPage() {
                 setSearchLoading(true);
                 const res = await searchUsers(searchQuery);
                 if (res.success && res.users) {
-                    // Filter out current user
                     setSearchResults(res.users.filter((u: any) => u.uid !== user?.uid));
                 }
                 setSearchLoading(false);
@@ -121,6 +143,20 @@ export default function ChatListPage() {
 
         return () => clearTimeout(delayDebounce);
     }, [searchQuery, user]);
+
+    const handleDeleteChat = async (e: React.MouseEvent, partnerId: string) => {
+        e.stopPropagation(); // Avoid navigating to chat
+        if (!user) return;
+        if (confirm("Supprimer cette discussion ?")) {
+            await clearConversation(user.uid, partnerId);
+            // Clear local Dexie
+            await localDb.messages
+                .where('[senderId+receiverId]')
+                .anyOf([[user.uid, partnerId], [partnerId, user.uid]])
+                .delete();
+            await localDb.chats.delete(partnerId);
+        }
+    };
 
     return (
         <ProtectedRoute>
@@ -200,6 +236,10 @@ export default function ChatListPage() {
                                         <div className="w-14 h-14 rounded-full bg-[#FFFC00] border-2 border-black flex items-center justify-center">
                                             <User className="w-7 h-7 text-black fill-black" />
                                         </div>
+                                        {/* Online Status Dot */}
+                                        {onlineUserIds.has(chat.partnerId) && (
+                                            <div className="absolute bottom-0 right-0 w-4 h-4 bg-green-500 rounded-full border-2 border-white shadow-sm" />
+                                        )}
                                         {chat.lastMessageSenderId !== user?.uid && !chat.lastMessageRead && (
                                             <div className="absolute -top-1 -right-1 w-5 h-5 bg-[#FF0049] rounded-full border-2 border-white flex items-center justify-center animate-bounce">
                                                 <div className="w-2 h-2 bg-white rounded-full" />
@@ -219,7 +259,15 @@ export default function ChatListPage() {
                                         </div>
                                     </div>
                                 </div>
-                                <Camera className="w-6 h-6 text-gray-300 hover:text-black transition-colors" />
+                                <div className="flex items-center gap-3">
+                                    <Camera className="w-6 h-6 text-gray-200 hover:text-black transition-colors" />
+                                    <button
+                                        onClick={(e) => handleDeleteChat(e, chat.partnerId)}
+                                        className="w-10 h-10 rounded-full bg-gray-50 flex items-center justify-center hover:bg-red-50 hover:text-red-500 transition-all active:scale-90"
+                                    >
+                                        <Trash2 className="w-5 h-5" />
+                                    </button>
+                                </div>
                             </motion.div>
                         ))
                     ) : (
@@ -270,7 +318,22 @@ export default function ChatListPage() {
                                     {searchResults.map(result => (
                                         <div
                                             key={result.uid}
-                                            onClick={() => router.push(`/chat?uid=${result.uid}`)}
+                                            onClick={async () => {
+                                                // Pre-populate chat metadata to avoid "Utilisateur"
+                                                await localDb.chats.put({
+                                                    partnerId: result.uid,
+                                                    partnerUsername: result.username,
+                                                    partnerEmail: result.email,
+                                                    lastMessageContent: "Nouvelle discussion",
+                                                    lastMessageTimestamp: new Date(),
+                                                    lastMessageSenderId: user?.uid || "",
+                                                    lastMessageRead: true,
+                                                    unreadCount: 0,
+                                                    isPinned: false,
+                                                    isArchived: false,
+                                                });
+                                                router.push(`/chat?uid=${result.uid}`);
+                                            }}
                                             className="flex items-center gap-4 p-3 rounded-2xl hover:bg-gray-50 active:bg-gray-100 cursor-pointer transition-colors"
                                         >
                                             <div className="w-12 h-12 rounded-full bg-[#FFFC00] border border-black flex items-center justify-center">

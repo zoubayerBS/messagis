@@ -5,9 +5,20 @@ import { prisma } from '@/lib/prisma'
 export async function syncUserAndCouple(data: {
     uid: string
     email: string
+    username?: string | null
     coupleId?: string | null
 }) {
     try {
+        // 0. Check username uniqueness if provided
+        if (data.username) {
+            const existing = await prisma.user.findUnique({
+                where: { username: data.username }
+            });
+            if (existing && existing.uid !== data.uid) {
+                return { success: false, error: "Ce pseudo est déjà utilisé par un autre utilisateur." };
+            }
+        }
+
         // 1. If coupleId exists, ensure Couple exists
         if (data.coupleId) {
             await prisma.couple.upsert({
@@ -20,9 +31,6 @@ export async function syncUserAndCouple(data: {
         }
 
         // 2. Upsert User
-        // Note: We need to handle cases where email might be null in some auth providers, 
-        // but assuming email exists based on usage. 
-        // If email is missing, we might need a fallback.
         if (!data.email) {
             console.error("Sync User: Email is missing for UID:", data.uid);
             return { success: false, error: "Email is required" };
@@ -31,13 +39,15 @@ export async function syncUserAndCouple(data: {
         const user = await prisma.user.upsert({
             where: { uid: data.uid },
             update: {
-                email: data.email, // Update email if changed
+                email: data.email,
                 coupleId: data.coupleId,
+                username: data.username || undefined,
             },
             create: {
                 uid: data.uid,
                 email: data.email,
                 coupleId: data.coupleId,
+                username: data.username || null,
             },
         })
 

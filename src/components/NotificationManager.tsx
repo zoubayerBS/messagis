@@ -2,7 +2,7 @@
 
 import { useEffect } from "react";
 import { messaging } from "@/lib/firebase";
-import { getToken, onMessage } from "firebase/messaging";
+import { getToken } from "firebase/messaging";
 import { useAuth } from "@/components/AuthProvider";
 import { updateFcmToken } from "@/actions/user";
 
@@ -37,12 +37,9 @@ export default function NotificationManager() {
                     }
                 }
 
-                // Handle foreground messages
-                onMessage(msg, (payload) => {
-                    console.log('Message received in foreground: ', payload);
-                    // We do NOT show a system notification here because useChatSync
-                    // already shows an in-app toast when we are in the foreground.
-                });
+                // Handle foreground messages (REMOVED: Ably now handles foreground updates)
+                // onMessage(msg, async (payload) => { ... });
+
 
             } catch (error) {
                 console.error("Error setting up notifications:", error);

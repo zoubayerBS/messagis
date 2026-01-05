@@ -11,6 +11,7 @@ import { syncUserAndCouple } from "@/actions/user";
 
 export default function SignupPage() {
     const [email, setEmail] = useState("");
+    const [username, setUsername] = useState("");
     const [password, setPassword] = useState("");
     const [confirmPassword, setConfirmPassword] = useState("");
     const [error, setError] = useState("");
@@ -21,6 +22,11 @@ export default function SignupPage() {
     const handleSignup = async (e: React.FormEvent) => {
         e.preventDefault();
         setError("");
+
+        if (username.length < 3) {
+            setError("Le pseudo doit faire au moins 3 caractères.");
+            return;
+        }
 
         if (password !== confirmPassword) {
             setError("Les mots de passe ne correspondent pas.");
@@ -39,11 +45,17 @@ export default function SignupPage() {
             const user = userCredential.user;
 
             // Sync with Prisma
-            await syncUserAndCouple({
+            const res = await syncUserAndCouple({
                 uid: user.uid,
                 email: user.email || "",
+                username: username,
                 coupleId: null
             });
+
+            if (!res.success) {
+                setError(typeof res.error === 'string' ? res.error : "Erreur lors de la synchronisation.");
+                return;
+            }
 
             router.push("/chat-list");
         } catch (err: any) {
@@ -100,6 +112,17 @@ export default function SignupPage() {
             <div className="w-full">
                 <form onSubmit={handleSignup} className="w-full flex flex-col">
                     <div className="px-8 space-y-4 mb-8">
+                        <div className="group space-y-1">
+                            <label className="text-[10px] font-bold text-gray-400 uppercase tracking-widest ml-1">Pseudo (ID unique)</label>
+                            <input
+                                type="text"
+                                value={username}
+                                onChange={(e) => setUsername(e.target.value.toLowerCase().replace(/\s/g, ""))}
+                                placeholder=" ton pseudo"
+                                required
+                                className="w-full border-b-2 border-gray-100 py-2 text-[16px] font-bold text-black outline-none focus:border-[#fffc00] transition-all"
+                            />
+                        </div>
                         <div className="group space-y-1">
                             <label className="text-[10px] font-bold text-gray-400 uppercase tracking-widest ml-1">Email</label>
                             <input

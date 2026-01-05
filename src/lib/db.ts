@@ -41,4 +41,9 @@ export class MessagisDB extends Dexie {
     }
 }
 
-export const db = new MessagisDB();
+// Singleton pattern for Next.js HMR logic
+const globalForDexie = global as unknown as { messagisDb: MessagisDB };
+
+export const db = globalForDexie.messagisDb || new MessagisDB();
+
+if (process.env.NODE_ENV !== 'production') globalForDexie.messagisDb = db;

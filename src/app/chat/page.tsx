@@ -16,13 +16,6 @@ import {
 } from "@/actions/chat";
 import { syncUserAndCouple, getUserProfile } from "@/actions/user";
 import { useAuth } from "@/components/AuthProvider";
-import { db as firestore } from "@/lib/firebase";
-import {
-    doc,
-    setDoc,
-    serverTimestamp,
-    onSnapshot,
-} from "firebase/firestore";
 import { useLiveQuery } from "dexie-react-hooks";
 import { db as localDb } from "@/lib/db";
 import { useChatSync } from "@/hooks/use-chat-sync";
@@ -74,22 +67,40 @@ export default function ChatPage() {
     const targetUserId = searchParams?.get('uid');
 
     // Use the sync hook
-    const { toastData, closeToast, isPartnerOnline, isPartnerTyping, sendTyping } = useChatSync(user?.uid, targetUserId);
+    const { toastData, closeToast, isPartnerOnline, isPartnerTyping, sendTyping, syncMessages, lastMessageId } = useChatSync(user?.uid, targetUserId);
 
-    // Live query from IndexedDB
+    const [page, setPage] = useState(1);
+    const [hasMore, setHasMore] = useState(true);
+    const [isLoadingMore, setIsLoadingMore] = useState(false);
+
     const messages = useLiveQuery(
-        () => {
+        async () => {
             if (!user || !targetUserId) return [];
-            return localDb.messages
+            // Fetch all messages for this specific conversation
+            const allMsgs = await localDb.messages
                 .where('[senderId+receiverId]')
                 .anyOf([[user.uid, targetUserId], [targetUserId, user.uid]])
-                .sortBy('timestamp');
+                .toArray();
+
+            // Sort by timestamp DESC to get the latest ones first
+            const sorted = allMsgs.sort((a, b) => {
+                const timeA = a.timestamp instanceof Date ? a.timestamp.getTime() : new Date(a.timestamp).getTime();
+                const timeB = b.timestamp instanceof Date ? b.timestamp.getTime() : new Date(b.timestamp).getTime();
+                return timeB - timeA;
+            });
+
+            // Take the newest N messages based on the current page
+            const paginated = sorted.slice(0, page * 15);
+
+            // Reverse again to show them in chronological order
+            return paginated.reverse();
         },
-        [user?.uid, targetUserId]
+        [user?.uid, targetUserId, lastMessageId, page]
     ) || [];
 
+    console.log(`[ChatPage] Rendered with ${messages.length} messages. LastID: ${lastMessageId}`);
+
     const [inputText, setInputText] = useState("");
-    // partnerStatus state removed, using hook values directly
     const [isSelfDestructNext, setIsSelfDestructNext] = useState(false);
     const scrollRef = useRef<HTMLDivElement>(null);
     const [isPending, startTransition] = useTransition();
@@ -105,11 +116,7 @@ export default function ChatPage() {
 
     const revealMessage = async (id: string) => {
         setRevealingMessages(prev => new Set(prev).add(id));
-
-        // Mark as read in DB so it's consumed
         await markAsRead(id);
-
-        // Hide after 5 seconds
         setTimeout(() => {
             setRevealingMessages(prev => {
                 const next = new Set(prev);
@@ -119,14 +126,11 @@ export default function ChatPage() {
         }, 5000);
     };
 
-
-
     const handleReaction = async (messageId: string, emoji: string) => {
         if (!user) return;
         await toggleReaction(messageId, emoji, user.uid);
         setShowEmojiPickerFor(null);
         setShowOptionsFor(null);
-        // Optimistic update could be complex with nested includes, relying on poll/revalidate for now
     };
 
     const handleDelete = async (messageId: string) => {
@@ -152,8 +156,33 @@ export default function ChatPage() {
         setEditInput("");
     };
 
-    // const [coupleId, setCoupleId] = useState<string | null>(null); // Unused in direct chat
-    // URL params already handled at the top
+    // Initial load
+    useEffect(() => {
+        if (user && targetUserId) {
+            setPage(1);
+            setHasMore(true);
+            syncMessages(15, 0).then((count: number | undefined) => {
+                if ((count || 0) < 15) setHasMore(false);
+            });
+        }
+    }, [user?.uid, targetUserId]);
+
+    const skipNextScroll = useRef(false);
+    const lastScrollHeight = useRef(0);
+
+    const loadMoreMessages = async () => {
+        if (isLoadingMore || !hasMore || !user || !targetUserId) return;
+        setIsLoadingMore(true);
+        if (scrollRef.current) {
+            lastScrollHeight.current = scrollRef.current.scrollHeight;
+        }
+        const nextOffset = page * 15;
+        const count = await syncMessages(15, nextOffset);
+        if ((count || 0) < 15) setHasMore(false);
+        skipNextScroll.current = true;
+        setPage(prev => prev + 1);
+        setIsLoadingMore(false);
+    };
 
     useEffect(() => {
         if (user && targetUserId) {
@@ -184,11 +213,13 @@ export default function ChatPage() {
         if (confirm("Supprimer toute la discussion ? (Ceci nettoiera votre vue uniquement)")) {
             await clearConversation(user.uid, targetUserId);
             setShowHeaderMenu(false);
-            // Clear local messages for this chat
+            // Clear local messages and chat entry for this chat
             await localDb.messages
                 .where('[senderId+receiverId]')
                 .anyOf([[user.uid, targetUserId], [targetUserId, user.uid]])
                 .delete();
+            await localDb.chats.delete(targetUserId);
+            router.push('/chat-list');
         }
     };
 
@@ -223,6 +254,12 @@ export default function ChatPage() {
 
     useEffect(() => {
         if (scrollRef.current) {
+            if (skipNextScroll.current) {
+                const delta = scrollRef.current.scrollHeight - lastScrollHeight.current;
+                scrollRef.current.scrollTop = delta;
+                skipNextScroll.current = false;
+                return;
+            }
             scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
         }
     }, [messages, isPartnerTyping]);
@@ -260,6 +297,9 @@ export default function ChatPage() {
                 reactions: [],
             };
             await localDb.messages.add(optimisticMsg);
+
+            // REMOVED: Redundant client-side relay causing duplication
+            // sendRealTimeMessage(optimisticMsg);
 
             const res = await sendMessageAction({
                 content,
@@ -381,6 +421,17 @@ export default function ChatPage() {
                     ref={scrollRef}
                     className="flex-1 overflow-y-auto p-6 space-y-6 scroll-smooth bg-[#fafafa]"
                 >
+                    {hasMore && (
+                        <div className="flex justify-center pb-4">
+                            <button
+                                onClick={loadMoreMessages}
+                                disabled={isLoadingMore}
+                                className="text-[10px] text-black font-black uppercase tracking-widest px-6 py-2 bg-white border-2 border-black rounded-full shadow-[0_2px_0_black] active:translate-y-[2px] active:shadow-none transition-all disabled:opacity-50"
+                            >
+                                {isLoadingMore ? "Chargement..." : "Voir plus de messages"}
+                            </button>
+                        </div>
+                    )}
                     <AnimatePresence initial={false}>
                         {messages.map((msg) => {
                             const isMe = msg.senderId === user?.uid;

@@ -1,9 +1,7 @@
-'use client';
-
 import { useEffect, useCallback, useState, useRef } from 'react';
 import { db } from '@/lib/db';
-import { getSocket } from '@/lib/socket-client';
-import { getMessages, getRecentChats } from '@/actions/chat';
+import { getAbly } from '@/lib/ably';
+import { getMessages, getRecentChats, getMessageById } from '@/actions/chat';
 
 export function useChatSync(userId: string | undefined, partnerId: string | null = null) {
     const [toastData, setToastData] = useState<{ show: boolean; title: string; body: string; senderId: string }>({
@@ -13,32 +11,33 @@ export function useChatSync(userId: string | undefined, partnerId: string | null
         senderId: ''
     });
 
-    const syncMessages = useCallback(async () => {
-        if (!userId || !partnerId) return;
+    const [isPartnerOnline, setIsPartnerOnline] = useState(false);
+    const [isPartnerTyping, setIsPartnerTyping] = useState(false);
+    const [lastMessageId, setLastMessageId] = useState<string | null>(null);
 
+    const partnerIdRef = useRef(partnerId);
+
+    useEffect(() => {
+        partnerIdRef.current = partnerId;
+    }, [partnerId]);
+
+    const syncMessages = useCallback(async (limit: number = 15, offset: number = 0) => {
+        if (!userId || !partnerId) return;
         try {
-            const res = await getMessages(userId, partnerId);
+            const res = await getMessages(userId, partnerId, limit, offset);
             if (res.success && res.messages) {
-                // Bulk update local DB
                 const localMsgs = res.messages.map((m: any) => ({
-                    id: m.id,
-                    senderId: m.senderId,
-                    receiverId: m.receiverId,
-                    content: m.content,
-                    type: m.type as any,
+                    ...m,
                     timestamp: m.timestamp && !isNaN(new Date(m.timestamp).getTime()) ? new Date(m.timestamp) : new Date(),
-                    read: m.read,
-                    isSelfDestructing: m.isSelfDestructing,
-                    isDeleted: m.isDeleted,
-                    isEdited: m.isEdited,
                     reactions: m.reactions || [],
                 }));
-
                 await db.messages.bulkPut(localMsgs);
-                console.log(`Synced ${localMsgs.length} messages for chat ${partnerId}`);
+                return res.messages.length;
             }
+            return 0;
         } catch (error) {
             console.error('Failed to sync messages:', error);
+            return 0;
         }
     }, [userId, partnerId]);
 
@@ -48,204 +47,170 @@ export function useChatSync(userId: string | undefined, partnerId: string | null
             const res = await getRecentChats(userId);
             if (res.success && res.chats) {
                 const localChats = res.chats.map((c: any) => ({
-                    partnerId: c.partnerId,
-                    partnerUsername: c.partnerUsername,
-                    partnerEmail: c.partnerEmail,
-                    lastMessageContent: c.lastMessage.content,
+                    ...c,
                     lastMessageTimestamp: c.lastMessage.timestamp && !isNaN(new Date(c.lastMessage.timestamp).getTime()) ? new Date(c.lastMessage.timestamp) : new Date(),
-                    lastMessageSenderId: c.lastMessage.senderId,
-                    lastMessageRead: c.lastMessage.read,
-                    lastMessageType: c.lastMessage.type,
-                    unreadCount: 0, // Simplified for now
-                    isPinned: c.isPinned,
-                    isArchived: false,
+                    unreadCount: 0,
                 }));
                 await db.chats.bulkPut(localChats);
-                console.log(`Synced ${localChats.length} recent chats`);
             }
         } catch (error) {
             console.error('Failed to sync recent chats:', error);
         }
     }, [userId]);
 
-    // Use refs for stable access in socket callbacks without triggering effect re-runs
-    const partnerIdRef = useRef(partnerId);
-
-    useEffect(() => {
-        partnerIdRef.current = partnerId;
-    }, [partnerId]);
-
-    // Resync on window focus (mini-resync)
-    useEffect(() => {
-        const handleFocus = () => {
-            if (!userId) return;
-            console.log('[useChatSync] Window focused, syncing...');
-            if (partnerIdRef.current) syncMessages();
-            syncChats();
-        };
-
-        window.addEventListener('focus', handleFocus);
-        return () => window.removeEventListener('focus', handleFocus);
-    }, [userId, syncMessages, syncChats]);
-
-    const [isPartnerOnline, setIsPartnerOnline] = useState(false);
-    const [isPartnerTyping, setIsPartnerTyping] = useState(false);
-
-    // Send typing status
-    const sendTyping = (isTyping: boolean) => {
-        const socket = getSocket();
-        if (socket && partnerIdRef.current) {
-            socket.emit(isTyping ? 'typing' : 'stop_typing', { receiverId: partnerIdRef.current });
-        }
-    };
-
+    // Ably Implementation
     useEffect(() => {
         if (!userId) return;
 
-        const socket = getSocket();
+        const ably = getAbly(userId);
+        if (!ably) return;
 
-        // Trigger explicit socket initialization API route
-        fetch('/api/socket');
+        // Channel for personal notifications & relay
+        const userChannel = ably.channels.get(`user:${userId}`);
 
-        const joinRoom = () => {
-            console.log('[useChatSync] Joining room:', userId);
-            socket.emit('join', userId);
-        };
+        // Channel for GLOBAL PRESENCE (New)
+        const globalPresenceChannel = ably.channels.get('global:presence');
+        globalPresenceChannel.presence.enter();
 
-        const handleConnect = () => {
-            console.log('[useChatSync] Socket connected, joining room...');
-            joinRoom();
-            // Re-sync messages on connection to catch up
-            if (partnerIdRef.current) syncMessages();
-            syncChats();
-        };
+        // Channel for current conversation (if any)
+        const chatChannelId = partnerId ? [`chat`, userId, partnerId].sort().join(':') : null;
+        const chatChannel = chatChannelId ? ably.channels.get(chatChannelId) : null;
 
-        const handleReconnect = (attempt: number) => {
-            console.log('[useChatSync] Socket reconnected after attempt:', attempt);
-            joinRoom();
-            if (partnerIdRef.current) syncMessages();
-            syncChats();
-        };
+        const handleNewMessage = async (msg: any) => {
+            let message = msg.data;
+            if (!message) return;
 
-        const handleUserStatus = (data: { userId: string; isOnline: boolean }) => {
-            if (data.userId === partnerIdRef.current) {
-                setIsPartnerOnline(data.isOnline);
-            }
-        };
-
-        const handleTyping = (data: { senderId: string }) => {
-            if (data.senderId === partnerIdRef.current) {
-                setIsPartnerTyping(true);
-            }
-        };
-
-        const handleStopTyping = (data: { senderId: string }) => {
-            if (data.senderId === partnerIdRef.current) {
-                setIsPartnerTyping(false);
-            }
-        };
-
-        const handleNewMessage = async (message: any) => {
-            console.log('[useChatSync] New message received via socket:', message);
-
-            // If message is from partner, stop typing indicator
-            if (message.senderId === partnerIdRef.current) {
-                setIsPartnerTyping(false);
-            }
-
-            // 1. Deduplication Logic
-            await db.transaction('rw', db.messages, async () => {
-                // Check if this specific message ID already exists (Update case)
-                const existingReal = await db.messages.get(message.id);
-                if (existingReal) {
-                    await db.messages.put({
-                        ...message,
-                        timestamp: message.timestamp && !isNaN(new Date(message.timestamp).getTime()) ? new Date(message.timestamp) : new Date(),
-                    });
+            // HANDLE PULL-BASED DELIVERY: Fetch full content if signal only
+            if (message.fetchFullContent) {
+                console.log('[useChatSync] Pulling full content for message:', message.id);
+                try {
+                    const res = await getMessageById(message.id);
+                    if (res.success && res.message) {
+                        message = res.message;
+                    } else {
+                        console.error('[useChatSync] Failed to pull message content:', res.error);
+                        return;
+                    }
+                } catch (err) {
+                    console.error('[useChatSync] Error pulling message:', err);
                     return;
                 }
+            }
 
-                // If sent by me, check for any "local-" message with same content/recipient
-                // that was created recently (within last 10 seconds)
-                if (message.senderId === userId) {
-                    const recentLocal = await db.messages
-                        .where('senderId').equals(userId)
-                        .filter(m =>
-                            m.id.startsWith('local-') &&
-                            m.content === message.content &&
-                            m.receiverId === message.receiverId &&
-                            Math.abs(new Date().getTime() - new Date(m.timestamp).getTime()) < 10000
-                        )
-                        .first();
+            console.log('[useChatSync] New message received via Ably:', message.id);
 
-                    if (recentLocal) {
-                        console.log('[useChatSync] Replaced optimistic message:', recentLocal.id, 'with real:', message.id);
-                        await db.messages.delete(recentLocal.id);
+            try {
+                // Deduplication logic for optimistic messages
+                await db.transaction('rw', db.messages, db.chats, async () => {
+                    const exists = await db.messages.get(message.id);
+                    if (exists) return;
+
+                    if (message.senderId === userId) {
+                        const recentLocal = await db.messages
+                            .where('senderId').equals(userId)
+                            .filter(m => m.id.startsWith('local-') && m.content === message.content && m.receiverId === message.receiverId)
+                            .first();
+                        if (recentLocal) {
+                            await db.messages.delete(recentLocal.id);
+                        }
                     }
+
+                    await db.messages.put({
+                        ...message,
+                        timestamp: new Date(message.timestamp),
+                    });
+
+                    // Only update chat preview if it's not a self-message
+                    if (message.senderId !== message.receiverId) {
+                        const partnerId = message.senderId === userId ? message.receiverId : message.senderId;
+                        const existingChat = await db.chats.get(partnerId);
+
+                        await db.chats.put({
+                            ...existingChat,
+                            partnerId,
+                            partnerUsername: message.senderId === userId ? existingChat?.partnerUsername : (message.senderUsername || existingChat?.partnerUsername),
+                            partnerEmail: message.senderId === userId ? existingChat?.partnerEmail : (message.senderEmail || existingChat?.partnerEmail),
+                            lastMessageContent: message.content,
+                            lastMessageTimestamp: new Date(message.timestamp),
+                            lastMessageSenderId: message.senderId,
+                            lastMessageRead: message.read,
+                            lastMessageType: message.type,
+                            unreadCount: (message.senderId === userId) ? 0 : ((existingChat?.unreadCount || 0) + 1),
+                            isPinned: existingChat?.isPinned || false,
+                            isArchived: existingChat?.isArchived || false,
+                        });
+                    }
+                });
+
+                setLastMessageId(message.id);
+
+                if (message.senderId !== userId && message.senderId !== partnerIdRef.current) {
+                    const senderDisplay = message.senderUsername ? `@${message.senderUsername}` : (message.senderEmail || 'Nouveau message');
+                    setToastData({
+                        show: true,
+                        title: senderDisplay,
+                        body: message.type === 'text' ? (message.content.length > 50 ? message.content.substring(0, 47) + '...' : message.content) : '📷 Image/Audio',
+                        senderId: message.senderId
+                    });
                 }
-
-                await db.messages.put({
-                    ...message,
-                    timestamp: message.timestamp && !isNaN(new Date(message.timestamp).getTime()) ? new Date(message.timestamp) : new Date(),
-                });
-            });
-
-            // 2. Update chat preview in Dexie
-            await db.chats.put({
-                partnerId: message.senderId === userId ? message.receiverId : message.senderId,
-                lastMessageContent: message.content,
-                lastMessageTimestamp: message.timestamp && !isNaN(new Date(message.timestamp).getTime()) ? new Date(message.timestamp) : new Date(),
-                lastMessageSenderId: message.senderId,
-                lastMessageRead: message.read,
-                lastMessageType: message.type,
-                unreadCount: message.senderId === userId ? 0 : 1, // Only increment if message is from partner
-                isPinned: false,
-                isArchived: false,
-            });
-
-            // 3. Show Foreground Toast only if:
-            // - We are NOT currently looking at this chat (partnerIdRef.current !== senderId)
-            // - The message was not sent by us
-            if (message.senderId !== userId && message.senderId !== partnerIdRef.current) {
-                const notificationBody = message.type === 'text'
-                    ? (message.content.length > 50 ? message.content.substring(0, 47) + '...' : message.content)
-                    : (message.type === 'image' ? '📷 Photo' : '🎵 Vocal');
-
-                setToastData({
-                    show: true,
-                    title: 'Nouveau message',
-                    body: notificationBody,
-                    senderId: message.senderId
-                });
-
-                // Auto-hide after 5 seconds
-                setTimeout(() => {
-                    setToastData(prev => ({ ...prev, show: false }));
-                }, 5000);
+            } catch (err) {
+                console.error('[useChatSync] Ably message sync error:', err);
             }
         };
 
-        // If socket is already connected when this effect mounts, ensure we join
-        if (socket.connected) {
-            joinRoom();
+        const handlePresence = (presenceMsg: any) => {
+            if (presenceMsg.clientId === partnerIdRef.current) {
+                setIsPartnerOnline(presenceMsg.action === 'enter' || presenceMsg.action === 'present');
+            }
+        };
+
+        const handleTyping = (msg: any) => {
+            if (msg.data.senderId === partnerIdRef.current) {
+                setIsPartnerTyping(msg.data.isTyping);
+            }
+        };
+
+        // Subscriptions
+        userChannel.subscribe('new_message', handleNewMessage);
+        globalPresenceChannel.presence.subscribe(['enter', 'leave', 'present'], handlePresence);
+
+        // Initial global presence check for partner
+        globalPresenceChannel.presence.get().then((members) => {
+            if (members) {
+                const isOnline = (members as any[]).some(m => m.clientId === partnerIdRef.current);
+                setIsPartnerOnline(isOnline);
+            }
+        });
+
+        if (chatChannel) {
+            chatChannel.presence.enter(); // Join presence for the chat (for others to see we are IN the chat)
+            chatChannel.subscribe('typing', handleTyping);
         }
 
-        socket.on('connect', handleConnect);
-        socket.on('reconnect', handleReconnect);
-        socket.on('new_message', handleNewMessage);
-        socket.on('user_status', handleUserStatus);
-        socket.on('typing', handleTyping);
-        socket.on('stop_typing', handleStopTyping);
+        // Initial Sync
+        syncChats();
 
         return () => {
-            socket.off('connect', handleConnect);
-            socket.off('reconnect', handleReconnect);
-            socket.off('new_message', handleNewMessage);
-            socket.off('user_status', handleUserStatus);
-            socket.off('typing', handleTyping);
-            socket.off('stop_typing', handleStopTyping);
+            userChannel.unsubscribe();
+            globalPresenceChannel.presence.unsubscribe();
+            if (chatChannel) {
+                chatChannel.presence.leave();
+                chatChannel.unsubscribe();
+            }
         };
-    }, [userId]); // Removed partnerId, syncChats, syncMessages from dependencies
+    }, [userId, partnerId]);
+
+    const sendTyping = (isTyping: boolean) => {
+        if (!userId || !partnerId) return;
+        const ably = getAbly(userId);
+        if (ably) {
+            const chatChannelId = [`chat`, userId, partnerId].sort().join(':');
+            ably.channels.get(chatChannelId).publish('typing', { senderId: userId, isTyping });
+        }
+    };
+
+    // REMOVED: Redundant message relay logic
+    // sendRealTimeMessage logic removed to avoid duplication
 
     return {
         syncMessages,
@@ -254,6 +219,7 @@ export function useChatSync(userId: string | undefined, partnerId: string | null
         closeToast: () => setToastData(prev => ({ ...prev, show: false })),
         isPartnerOnline,
         isPartnerTyping,
-        sendTyping
+        sendTyping,
+        lastMessageId
     };
 }
