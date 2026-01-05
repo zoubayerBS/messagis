@@ -74,7 +74,7 @@ export default function ChatPage() {
     const targetUserId = searchParams?.get('uid');
 
     // Use the sync hook
-    const { toastData, closeToast } = useChatSync(user?.uid, targetUserId);
+    const { toastData, closeToast, isPartnerOnline, isPartnerTyping, sendTyping } = useChatSync(user?.uid, targetUserId);
 
     // Live query from IndexedDB
     const messages = useLiveQuery(
@@ -89,7 +89,7 @@ export default function ChatPage() {
     ) || [];
 
     const [inputText, setInputText] = useState("");
-    const [partnerStatus, setPartnerStatus] = useState({ isOnline: false, isTyping: false });
+    // partnerStatus state removed, using hook values directly
     const [isSelfDestructNext, setIsSelfDestructNext] = useState(false);
     const scrollRef = useRef<HTMLDivElement>(null);
     const [isPending, startTransition] = useTransition();
@@ -192,34 +192,9 @@ export default function ChatPage() {
         }
     };
 
-    useEffect(() => {
-        if (!user) return;
-        // Register online status
-        const userStatusRef = doc(firestore, "status", user.uid);
-        setDoc(userStatusRef, {
-            isOnline: true,
-            lastSeen: serverTimestamp(),
-        }, { merge: true });
+    // REMOVED: Firestore based online status registration
 
-        return () => {
-            setDoc(userStatusRef, { isOnline: false }, { merge: true });
-        };
-    }, [user]);
-
-    // Listen for partner's status (Direct)
-    useEffect(() => {
-        if (!targetUserId) return;
-        const partnerStatusRef = doc(firestore, "status", targetUserId);
-        const unsubscribe = onSnapshot(partnerStatusRef, (docSnap) => {
-            if (docSnap.exists()) {
-                setPartnerStatus({
-                    isOnline: docSnap.data()?.isOnline,
-                    isTyping: docSnap.data()?.isTyping
-                });
-            }
-        });
-        return () => unsubscribe();
-    }, [targetUserId]);
+    // REMOVED: Firestore listener for partner status
 
     const [partnerName, setPartnerName] = useState("Chargement...");
 
@@ -250,12 +225,13 @@ export default function ChatPage() {
         if (scrollRef.current) {
             scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
         }
-    }, [messages, partnerStatus.isTyping]);
+    }, [messages, isPartnerTyping]);
 
     const handleTyping = (text: string) => {
         setInputText(text);
         if (!user) return;
-        setDoc(doc(firestore, "status", user.uid), { isTyping: text.length > 0 }, { merge: true });
+        // Send typing via socket hook
+        sendTyping(text.length > 0);
     };
 
     const sendMessage = async (e?: React.FormEvent) => {
@@ -265,8 +241,8 @@ export default function ChatPage() {
         const content = inputText;
         setInputText("");
 
-        // Reset typing status
-        setDoc(doc(firestore, "status", user.uid), { isTyping: false }, { merge: true });
+        // Reset typing status via socket hook
+        sendTyping(false);
 
         try {
             const tempId = `local-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
@@ -348,8 +324,8 @@ export default function ChatPage() {
                             </div>
                             <div>
                                 <h1 className="text-lg font-black text-black uppercase tracking-tighter">{partnerName}</h1>
-                                <p className={`text-[10px] uppercase font-bold tracking-widest ${partnerStatus.isOnline ? "text-[#00B9FF]" : "text-gray-400"}`}>
-                                    {partnerStatus.isOnline ? "En ligne" : "Hors ligne"}
+                                <p className={`text-[10px] uppercase font-bold tracking-widest ${isPartnerOnline ? "text-[#00B9FF]" : "text-gray-400"}`}>
+                                    {isPartnerOnline ? "En ligne" : "Hors ligne"}
                                 </p>
                             </div>
                         </div>
@@ -616,7 +592,7 @@ export default function ChatPage() {
                     </AnimatePresence>
 
                     {/* Typing indicator */}
-                    {partnerStatus.isTyping && (
+                    {isPartnerTyping && (
                         <motion.div
                             initial={{ opacity: 0, x: -10 }}
                             animate={{ opacity: 1, x: 0 }}

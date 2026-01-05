@@ -88,6 +88,17 @@ export function useChatSync(userId: string | undefined, partnerId: string | null
         return () => window.removeEventListener('focus', handleFocus);
     }, [userId, syncMessages, syncChats]);
 
+    const [isPartnerOnline, setIsPartnerOnline] = useState(false);
+    const [isPartnerTyping, setIsPartnerTyping] = useState(false);
+
+    // Send typing status
+    const sendTyping = (isTyping: boolean) => {
+        const socket = getSocket();
+        if (socket && partnerIdRef.current) {
+            socket.emit(isTyping ? 'typing' : 'stop_typing', { receiverId: partnerIdRef.current });
+        }
+    };
+
     useEffect(() => {
         if (!userId) return;
 
@@ -116,8 +127,31 @@ export function useChatSync(userId: string | undefined, partnerId: string | null
             syncChats();
         };
 
+        const handleUserStatus = (data: { userId: string; isOnline: boolean }) => {
+            if (data.userId === partnerIdRef.current) {
+                setIsPartnerOnline(data.isOnline);
+            }
+        };
+
+        const handleTyping = (data: { senderId: string }) => {
+            if (data.senderId === partnerIdRef.current) {
+                setIsPartnerTyping(true);
+            }
+        };
+
+        const handleStopTyping = (data: { senderId: string }) => {
+            if (data.senderId === partnerIdRef.current) {
+                setIsPartnerTyping(false);
+            }
+        };
+
         const handleNewMessage = async (message: any) => {
             console.log('[useChatSync] New message received via socket:', message);
+
+            // If message is from partner, stop typing indicator
+            if (message.senderId === partnerIdRef.current) {
+                setIsPartnerTyping(false);
+            }
 
             // 1. Deduplication Logic
             await db.transaction('rw', db.messages, async () => {
@@ -199,11 +233,17 @@ export function useChatSync(userId: string | undefined, partnerId: string | null
         socket.on('connect', handleConnect);
         socket.on('reconnect', handleReconnect);
         socket.on('new_message', handleNewMessage);
+        socket.on('user_status', handleUserStatus);
+        socket.on('typing', handleTyping);
+        socket.on('stop_typing', handleStopTyping);
 
         return () => {
             socket.off('connect', handleConnect);
             socket.off('reconnect', handleReconnect);
             socket.off('new_message', handleNewMessage);
+            socket.off('user_status', handleUserStatus);
+            socket.off('typing', handleTyping);
+            socket.off('stop_typing', handleStopTyping);
         };
     }, [userId]); // Removed partnerId, syncChats, syncMessages from dependencies
 
@@ -211,6 +251,9 @@ export function useChatSync(userId: string | undefined, partnerId: string | null
         syncMessages,
         syncChats,
         toastData,
-        closeToast: () => setToastData(prev => ({ ...prev, show: false }))
+        closeToast: () => setToastData(prev => ({ ...prev, show: false })),
+        isPartnerOnline,
+        isPartnerTyping,
+        sendTyping
     };
 }

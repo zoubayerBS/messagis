@@ -64,14 +64,8 @@ export default function ChatListPage() {
     const [loading, setLoading] = useState(false); // No longer need local loading state for this
 
     // Sync online status
-    useEffect(() => {
-        if (!user) return;
-        const userStatusRef = doc(firestore, "status", user.uid);
-        setDoc(userStatusRef, { isOnline: true, lastSeen: serverTimestamp() }, { merge: true });
-        return () => {
-            setDoc(userStatusRef, { isOnline: false }, { merge: true });
-        };
-    }, [user]);
+    // Sync online status - REPLACED BY Socket.io in useChatSync
+    // Firestore status updates removed.
 
     // Recent Chats loading and sync is now handled by useChatSync and useLiveQuery
 
