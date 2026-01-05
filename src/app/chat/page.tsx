@@ -299,8 +299,10 @@ export default function ChatPage() {
                     await localDb.messages.delete(tempId);
                     await localDb.messages.put({
                         ...res.message,
+                        id: res.message.id,
                         timestamp: new Date(res.message.timestamp), // Ensure Date object
-                        reactions: res.message.reactions || []
+                        reactions: res.message.reactions || [],
+                        receiverId: res.message.receiverId || targetUserId || "", // Ensure string
                     });
                 });
             } else {
