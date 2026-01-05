@@ -24,6 +24,9 @@ export async function sendMessage(data: {
                 read: false,
                 // We leave coupleId null or optionnal
             },
+            include: {
+                reactions: true
+            }
         })
 
         // -- Socket.io Signaling (Immediate Real-time) --

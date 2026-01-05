@@ -299,7 +299,8 @@ export default function ChatPage() {
                     await localDb.messages.delete(tempId);
                     await localDb.messages.put({
                         ...res.message,
-                        timestamp: new Date(res.message.timestamp) // Ensure Date object
+                        timestamp: new Date(res.message.timestamp), // Ensure Date object
+                        reactions: res.message.reactions || []
                     });
                 });
             } else {
