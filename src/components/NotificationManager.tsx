@@ -40,13 +40,8 @@ export default function NotificationManager() {
                 // Handle foreground messages
                 onMessage(msg, (payload) => {
                     console.log('Message received in foreground: ', payload);
-                    // You can show a custom toast or notification here
-                    if (payload.notification) {
-                        new Notification(payload.notification.title || "Nouveau message", {
-                            body: payload.notification.body,
-                            icon: "/icons/icon-192x192.png"
-                        });
-                    }
+                    // We do NOT show a system notification here because useChatSync
+                    // already shows an in-app toast when we are in the foreground.
                 });
 
             } catch (error) {
