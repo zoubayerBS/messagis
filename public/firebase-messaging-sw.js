@@ -16,14 +16,31 @@ const messaging = firebase.messaging();
 
 messaging.onBackgroundMessage((payload) => {
     console.log('[firebase-messaging-sw.js] Received background message ', payload);
+
     const notificationTitle = payload.notification?.title || "Nouveau message";
+    const senderId = payload.data?.senderId;
+    const clickAction = payload.data?.click_action || '/chat';
+
     const notificationOptions = {
         body: payload.notification?.body || "Vous avez reçu un nouveau message sur Messagis.",
         icon: '/icons/icon-192x192.png',
         badge: '/icons/icon-192x192.png',
-        data: payload.data, // This contains senderId and click_action
+        data: payload.data,
         vibrate: [200, 100, 200],
-        tag: 'messagis-notification' // Prevent multiple notifications for the same app
+        tag: payload.data?.tag || 'messagis-notification',
+        renotify: true, // Renotify if same tag
+        requireInteraction: true,
+        actions: [
+            {
+                action: 'reply',
+                title: 'Répondre ✍️',
+                icon: '/icons/reply-icon.png' // Optional: if exists
+            },
+            {
+                action: 'open',
+                title: 'Ouvrir Messagis ✨'
+            }
+        ]
     };
 
     return self.registration.showNotification(notificationTitle, notificationOptions);

@@ -16,19 +16,16 @@ import {
 } from "@/actions/chat";
 import { syncUserAndCouple, getUserProfile } from "@/actions/user";
 import { useAuth } from "@/components/AuthProvider";
-import { db } from "@/lib/firebase";
+import { db as firestore } from "@/lib/firebase";
 import {
-    collection,
-    query, // might be unused, check
-    orderBy, // unused?
-    onSnapshot, // KEY to remove
     doc,
     setDoc,
-    getDoc,
     serverTimestamp,
-    where, // Restored for status
-    updateDoc // Restored for markAsRead (if we keep it synced) or remove usages
+    onSnapshot,
 } from "firebase/firestore";
+import { useLiveQuery } from "dexie-react-hooks";
+import { db as localDb } from "@/lib/db";
+import { useChatSync } from "@/hooks/use-chat-sync";
 import {
     MoreVertical,
     Send,
@@ -68,14 +65,31 @@ import MediaUpload from "@/components/MediaUpload";
 import VoiceRecorder from "@/components/VoiceRecorder";
 import HeartAnimation from "@/components/HeartAnimation";
 import VoiceMessage from "@/components/VoiceMessage";
+import NotificationToast from "@/components/NotificationToast";
 
 export default function ChatPage() {
     const { user } = useAuth();
     const router = useRouter();
-    const [messages, setMessages] = useState<Message[]>([]);
+    const searchParams = useSearchParams();
+    const targetUserId = searchParams.get('uid');
+
+    // Use the sync hook
+    const { toastData, closeToast } = useChatSync(user?.uid, targetUserId);
+
+    // Live query from IndexedDB
+    const messages = useLiveQuery(
+        () => {
+            if (!user || !targetUserId) return [];
+            return localDb.messages
+                .where('[senderId+receiverId]')
+                .anyOf([[user.uid, targetUserId], [targetUserId, user.uid]])
+                .sortBy('timestamp');
+        },
+        [user?.uid, targetUserId]
+    ) || [];
+
     const [inputText, setInputText] = useState("");
     const [partnerStatus, setPartnerStatus] = useState({ isOnline: false, isTyping: false });
-    const [partnerId, setPartnerId] = useState<string | null>(null);
     const [isSelfDestructNext, setIsSelfDestructNext] = useState(false);
     const scrollRef = useRef<HTMLDivElement>(null);
     const [isPending, startTransition] = useTransition();
@@ -87,6 +101,23 @@ export default function ChatPage() {
     const [chatSettings, setChatSettings] = useState<any>(null);
     const [lastFetchTime, setLastFetchTime] = useState<Date>(new Date());
     const [selectedImage, setSelectedImage] = useState<string | null>(null);
+    const [revealingMessages, setRevealingMessages] = useState<Set<string>>(new Set());
+
+    const revealMessage = async (id: string) => {
+        setRevealingMessages(prev => new Set(prev).add(id));
+
+        // Mark as read in DB so it's consumed
+        await markAsRead(id);
+
+        // Hide after 5 seconds
+        setTimeout(() => {
+            setRevealingMessages(prev => {
+                const next = new Set(prev);
+                next.delete(id);
+                return next;
+            });
+        }, 5000);
+    };
 
 
 
@@ -121,15 +152,8 @@ export default function ChatPage() {
         setEditInput("");
     };
 
-    const [coupleId, setCoupleId] = useState<string | null>(null); // Keep for backward compat? Or just ignore.
-    // New: Partner ID for direct messaging
-    // We should get this from query param or props if we were using dynamic routing.
-    // For now, let's assume we are fixing the "Couple" concept by just chatting with a "Target".
-    // But wait, the user just said "like WhatsApp".
-    // Usually you click a contact => /chat?uid=OTHER_UID
-    // Let's grab it from URL search params.
-    const searchParams = useSearchParams();
-    const targetUserId = searchParams.get('uid');
+    // const [coupleId, setCoupleId] = useState<string | null>(null); // Unused in direct chat
+    // URL params already handled at the top
 
     useEffect(() => {
         if (user && targetUserId) {
@@ -160,14 +184,18 @@ export default function ChatPage() {
         if (confirm("Supprimer toute la discussion ? (Ceci nettoiera votre vue uniquement)")) {
             await clearConversation(user.uid, targetUserId);
             setShowHeaderMenu(false);
-            setMessages([]);
+            // Clear local messages for this chat
+            await localDb.messages
+                .where('[senderId+receiverId]')
+                .anyOf([[user.uid, targetUserId], [targetUserId, user.uid]])
+                .delete();
         }
     };
 
     useEffect(() => {
         if (!user) return;
         // Register online status
-        const userStatusRef = doc(db, "status", user.uid);
+        const userStatusRef = doc(firestore, "status", user.uid);
         setDoc(userStatusRef, {
             isOnline: true,
             lastSeen: serverTimestamp(),
@@ -181,12 +209,12 @@ export default function ChatPage() {
     // Listen for partner's status (Direct)
     useEffect(() => {
         if (!targetUserId) return;
-        const partnerStatusRef = doc(db, "status", targetUserId);
+        const partnerStatusRef = doc(firestore, "status", targetUserId);
         const unsubscribe = onSnapshot(partnerStatusRef, (docSnap) => {
             if (docSnap.exists()) {
                 setPartnerStatus({
-                    isOnline: docSnap.data().isOnline,
-                    isTyping: docSnap.data().isTyping
+                    isOnline: docSnap.data()?.isOnline,
+                    isTyping: docSnap.data()?.isTyping
                 });
             }
         });
@@ -208,46 +236,15 @@ export default function ChatPage() {
         fetchPartner();
     }, [targetUserId]);
 
-    // Load and Sync Messages (Direct Message)
+    // Load and Sync Messages (Direct Message) - REPLACED BY useChatSync and useLiveQuery
+    // Keeping mark as read logic if needed elsewhere or refactoring it.
     useEffect(() => {
-        if (!user || !targetUserId) return;
-
-        const syncMessages = async () => {
-            const res = await getMessagesAction(user.uid, targetUserId);
-            if (res.success && res.messages) {
-                setMessages(res.messages as any[]);
-                setLastFetchTime(new Date());
-
-                // Mark as read if we have unread messages from this partner
-                const hasUnread = res.messages.some((m: any) => m.senderId === targetUserId && !m.read);
-                if (hasUnread) {
-                    await markConversationAsRead(user.uid, targetUserId);
-                }
-            }
-        };
-
-        // Initial load
-        syncMessages();
-
-        // Real-time listener via Firestore signal
-        const chatId = [user.uid, targetUserId].sort().join('_');
-        const signalRef = doc(db, "chatSignals", chatId);
-
-        const unsubscribe = onSnapshot(signalRef, (docSnap) => {
-            if (docSnap.exists()) {
-                console.log("New message signal received, refreshing...");
-                syncMessages();
-            }
-        });
-
-        // Backup polling (less frequent, every 10s) just in case
-        const backupInterval = setInterval(syncMessages, 10000);
-
-        return () => {
-            unsubscribe();
-            clearInterval(backupInterval);
-        };
-    }, [user, targetUserId]);
+        if (!user || !targetUserId || !messages.length) return;
+        const hasUnread = messages.some((m: any) => m.senderId === targetUserId && !m.read);
+        if (hasUnread) {
+            markConversationAsRead(user.uid, targetUserId);
+        }
+    }, [user, targetUserId, messages.length]);
 
     useEffect(() => {
         if (scrollRef.current) {
@@ -258,7 +255,7 @@ export default function ChatPage() {
     const handleTyping = (text: string) => {
         setInputText(text);
         if (!user) return;
-        setDoc(doc(db, "status", user.uid), { isTyping: text.length > 0 }, { merge: true });
+        setDoc(doc(firestore, "status", user.uid), { isTyping: text.length > 0 }, { merge: true });
     };
 
     const sendMessage = async (e?: React.FormEvent) => {
@@ -269,9 +266,25 @@ export default function ChatPage() {
         setInputText("");
 
         // Reset typing status
-        setDoc(doc(db, "status", user.uid), { isTyping: false }, { merge: true });
+        setDoc(doc(firestore, "status", user.uid), { isTyping: false }, { merge: true });
 
         try {
+            // Optimistic update to IndexedDB
+            const optimisticMsg = {
+                id: `local-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
+                content,
+                type: "text" as const,
+                senderId: user.uid,
+                receiverId: targetUserId,
+                timestamp: new Date(),
+                read: false,
+                isSelfDestructing: isSelfDestructNext,
+                isDeleted: false,
+                isEdited: false,
+                reactions: [],
+            };
+            await localDb.messages.add(optimisticMsg);
+
             const res = await sendMessageAction({
                 content,
                 type: "text",
@@ -280,14 +293,9 @@ export default function ChatPage() {
                 isSelfDestructing: isSelfDestructNext
             });
 
-            if (res.success && res.message) {
-                const newMsg: any = res.message;
-                setMessages((prev) => {
-                    if (prev.find(m => m.id === newMsg.id)) return prev;
-                    return [...prev, newMsg];
-                });
-            } else {
+            if (!res.success) {
                 console.error("Failed to save to Prisma:", res.error);
+                // Optionally remove optimistic message or mark as failed
             }
         } catch (err) {
             console.error("Prisma action error:", err);
@@ -298,11 +306,11 @@ export default function ChatPage() {
 
     const markAsRead = async (id: string) => {
         try {
-            // Prisma only (Firestore removed)
-            await markMessageAction(id);
+            // Update local DB immediately
+            await localDb.messages.update(id, { read: true });
 
-            // Optimistic update locally
-            setMessages(prev => prev.map(m => m.id === id ? { ...m, read: true } : m));
+            // Prisma
+            await markMessageAction(id);
         } catch (error) {
             console.error("Error marking as read:", error);
         }
@@ -474,18 +482,24 @@ export default function ChatPage() {
                                                     {msg.type === "text" && (
                                                         <div className="px-4 py-2.5">
                                                             {msg.isSelfDestructing ? (
-                                                                !msg.read ? (
+                                                                revealingMessages.has(msg.id) ? (
+                                                                    <p className="font-medium leading-tight text-[15px] whitespace-pre-wrap">{msg.content}</p>
+                                                                ) : msg.read ? (
+                                                                    <p className="italic opacity-40 text-xs text-red-100 flex items-center gap-1">
+                                                                        <X className="w-3 h-3" /> Secret expiré
+                                                                    </p>
+                                                                ) : (
                                                                     isMe ? (
-                                                                        <p className="font-medium leading-tight text-[15px] italic opacity-80">Message éphémère envoyé</p>
+                                                                        <p className="font-medium leading-tight text-[15px] italic opacity-80 flex items-center gap-2">
+                                                                            <Lock className="w-3 h-3" /> Chat secret envoyé
+                                                                        </p>
                                                                     ) : (
-                                                                        <div onClick={() => markAsRead(msg.id)} className="cursor-pointer">
-                                                                            <p className="italic opacity-60 flex items-center gap-2">
-                                                                                <Lock className="w-3 h-3" /> Appuie pour voir le secret
+                                                                        <div onClick={() => revealMessage(msg.id)} className="cursor-pointer">
+                                                                            <p className="italic opacity-80 flex items-center gap-2 font-bold">
+                                                                                <Lock className="w-4 h-4" /> Appuie pour voir (5s)
                                                                             </p>
                                                                         </div>
                                                                     )
-                                                                ) : (
-                                                                    <p className="italic opacity-40 text-xs">Message expiré</p>
                                                                 )
                                                             ) : (
                                                                 <p className="font-medium leading-tight text-[15px] whitespace-pre-wrap">{msg.content}</p>
@@ -498,12 +512,28 @@ export default function ChatPage() {
 
                                                     {msg.type === "image" && (
                                                         <div className="p-1">
-                                                            {msg.isSelfDestructing && !isMe && !msg.read ? (
-                                                                <div onClick={() => markAsRead(msg.id)} className="w-full h-32 bg-gray-200 flex items-center justify-center rounded-[15px] cursor-pointer">
-                                                                    <Lock className="w-6 h-6 text-gray-400" />
-                                                                </div>
-                                                            ) : msg.isSelfDestructing && msg.read ? (
-                                                                <div className="px-4 py-2 text-xs italic opacity-40">Photo expirée</div>
+                                                            {msg.isSelfDestructing ? (
+                                                                revealingMessages.has(msg.id) ? (
+                                                                    <img
+                                                                        src={msg.content}
+                                                                        alt="Shared"
+                                                                        className="rounded-[15px] max-h-64 w-full object-cover cursor-pointer hover:opacity-90 transition-opacity"
+                                                                        onClick={() => setSelectedImage(msg.content)}
+                                                                    />
+                                                                ) : msg.read ? (
+                                                                    <div className="px-4 py-2 text-xs italic opacity-40">Photo expirée</div>
+                                                                ) : (
+                                                                    isMe ? (
+                                                                        <div className="px-4 py-2 text-xs italic opacity-80 flex items-center gap-1">
+                                                                            <Lock className="w-3 h-3" /> Photo secrète envoyée
+                                                                        </div>
+                                                                    ) : (
+                                                                        <div onClick={() => revealMessage(msg.id)} className="w-full h-32 bg-gray-200/50 flex flex-col items-center justify-center rounded-[15px] cursor-pointer gap-2 border border-dashed border-gray-300">
+                                                                            <Lock className="w-6 h-6 text-gray-400" />
+                                                                            <span className="text-[10px] font-bold text-gray-500 uppercase">Voir la photo (5s)</span>
+                                                                        </div>
+                                                                    )
+                                                                )
                                                             ) : (
                                                                 <img
                                                                     src={msg.content}
@@ -517,8 +547,23 @@ export default function ChatPage() {
 
                                                     {msg.type === "audio" && (
                                                         <div className="px-2 py-1">
-                                                            {msg.isSelfDestructing && msg.read ? (
-                                                                <p className="text-xs italic opacity-40 px-3 py-2">Audio expiré</p>
+                                                            {msg.isSelfDestructing ? (
+                                                                revealingMessages.has(msg.id) ? (
+                                                                    <VoiceMessage url={msg.content} isMe={isMe} />
+                                                                ) : msg.read ? (
+                                                                    <p className="text-xs italic opacity-40 px-3 py-2">Audio expiré</p>
+                                                                ) : (
+                                                                    isMe ? (
+                                                                        <div className="px-4 py-2 text-xs italic opacity-80 flex items-center gap-1">
+                                                                            <Lock className="w-3 h-3" /> Voice secret envoyé
+                                                                        </div>
+                                                                    ) : (
+                                                                        <div onClick={() => revealMessage(msg.id)} className="cursor-pointer px-4 py-2 bg-gray-100 rounded-xl flex items-center gap-3">
+                                                                            <Lock className="w-4 h-4 text-gray-400" />
+                                                                            <span className="text-xs font-bold text-gray-500">Écouter (5s)</span>
+                                                                        </div>
+                                                                    )
+                                                                )
                                                             ) : (
                                                                 <VoiceMessage url={msg.content} isMe={isMe} />
                                                             )}
@@ -529,11 +574,9 @@ export default function ChatPage() {
 
                                             <div className={`px-3 pb-2 flex items-center gap-1 ${isMe ? "justify-end" : "justify-start"}`}>
                                                 <span className={`text-[9px] font-bold uppercase ${isMe ? "text-white/60" : "text-gray-400"}`}>
-                                                    {msg.timestamp?.toDate
-                                                        ? format(msg.timestamp.toDate(), "HH:mm", { locale: fr })
-                                                        : msg.timestamp
-                                                            ? format(new Date(msg.timestamp), "HH:mm", { locale: fr })
-                                                            : "..."}
+                                                    {msg.timestamp && !isNaN(new Date(msg.timestamp).getTime())
+                                                        ? format(new Date(msg.timestamp), "HH:mm", { locale: fr })
+                                                        : "..."}
                                                 </span>
                                                 {isMe && (
                                                     <div className={`w-1.5 h-1.5 rounded-full ${msg.read ? "bg-white" : "bg-white/30"}`} />
@@ -639,6 +682,15 @@ export default function ChatPage() {
                     </motion.div>
                 )}
             </AnimatePresence>
+
+            {/* Notification Toast */}
+            <NotificationToast
+                show={toastData.show}
+                title={toastData.title}
+                body={toastData.body}
+                senderId={toastData.senderId}
+                onClose={closeToast}
+            />
         </ProtectedRoute>
     );
 }

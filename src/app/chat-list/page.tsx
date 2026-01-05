@@ -3,19 +3,17 @@
 import { useEffect, useState } from "react";
 import { useAuth } from "@/components/AuthProvider";
 import { getRecentChats } from "@/actions/chat";
-import { db } from "@/lib/firebase";
+import { db as firestore } from "@/lib/firebase";
 import {
-    collection,
-    query,
-    where,
-    orderBy,
-    limit,
     onSnapshot,
     doc,
-    getDoc,
     setDoc,
     serverTimestamp
 } from "firebase/firestore";
+import { useLiveQuery } from "dexie-react-hooks";
+import { db as localDb } from "@/lib/db";
+import { useChatSync } from "@/hooks/use-chat-sync";
+import NotificationToast from "@/components/NotificationToast";
 import { signOut } from "firebase/auth";
 import { auth } from "@/lib/firebase";
 import {
@@ -53,79 +51,57 @@ interface ChatPartner {
 export default function ChatListPage() {
     const { user } = useAuth();
     const router = useRouter();
-    const [chats, setChats] = useState<any[]>([]);
-    const [loading, setLoading] = useState(true);
+
+    // Use our global sync hook
+    const { toastData, closeToast } = useChatSync(user?.uid);
+
+    // Live query from Dexie
+    const chats = useLiveQuery(
+        () => localDb.chats.orderBy('lastMessageTimestamp').reverse().toArray(),
+        []
+    ) || [];
+
+    const [loading, setLoading] = useState(false); // No longer need local loading state for this
 
     // Sync online status
     useEffect(() => {
         if (!user) return;
-        const userStatusRef = doc(db, "status", user.uid);
+        const userStatusRef = doc(firestore, "status", user.uid);
         setDoc(userStatusRef, { isOnline: true, lastSeen: serverTimestamp() }, { merge: true });
         return () => {
             setDoc(userStatusRef, { isOnline: false }, { merge: true });
         };
     }, [user]);
 
-    // Fetch and sync Recent Chats in real-time
-    useEffect(() => {
-        if (!user) return;
-
-        const fetchChats = async () => {
-            const res = await getRecentChats(user.uid);
-            if (res.success && res.chats) {
-                setChats(res.chats);
-            }
-            setLoading(false);
-        };
-
-        // Initial fetch
-        fetchChats();
-
-        // Real-time listener via user-specific signal
-        const signalRef = doc(db, "userSignals", user.uid);
-        const unsubscribe = onSnapshot(signalRef, (docSnap) => {
-            if (docSnap.exists()) {
-                console.log("Chat list update signal received, refreshing...");
-                fetchChats();
-            }
-        });
-
-        // Backup polling (every 15s)
-        const backupInterval = setInterval(fetchChats, 15000);
-
-        return () => {
-            unsubscribe();
-            clearInterval(backupInterval);
-        };
-    }, [user]);
+    // Recent Chats loading and sync is now handled by useChatSync and useLiveQuery
 
     const getStatusIcon = (chat: any) => {
-        const isMe = chat.lastMessage.senderId === user?.uid;
+        const isMe = chat.lastMessageSenderId === user?.uid;
         if (isMe) {
-            return chat.lastMessage.read
+            return chat.lastMessageRead
                 ? <div className="w-5 h-5 rounded-[4px] border-2 border-[#00B9FF] flex items-center justify-center"><div className="w-2 h-2 bg-[#00B9FF] rounded-sm" /></div>
                 : <div className="w-5 h-5 bg-[#00B9FF] rounded-[4px]" />;
         } else {
-            return chat.lastMessage.read
+            return chat.lastMessageRead
                 ? <div className="w-5 h-5 rounded-[4px] border-2 border-[#FF0049] flex items-center justify-center ml-1"><div className="w-2 h-2 bg-[#FF0049] rounded-sm" /></div>
                 : <div className="w-5 h-5 bg-[#FF0049] rounded-[4px] ml-1" />;
         }
     };
 
     const getStatusText = (chat: any) => {
-        const isMe = chat.lastMessage.senderId === user?.uid;
-        const time = chat.lastMessage.timestamp // Handle date format
-            ? format(new Date(chat.lastMessage.timestamp), "HH:mm", { locale: fr })
+        const isMe = chat.lastMessageSenderId === user?.uid;
+        const time = chat.lastMessageTimestamp
+            ? format(new Date(chat.lastMessageTimestamp), "HH:mm", { locale: fr })
             : "...";
 
         if (isMe) {
-            if (chat.lastMessage.type === 'image') return `Photo envoyée • ${time}`;
-            if (chat.lastMessage.type === 'audio') return `Vocal envoyé • ${time}`;
+            if (chat.lastMessageType === 'image') return `Photo envoyée • ${time}`;
+            if (chat.lastMessageType === 'audio') return `Vocal envoyé • ${time}`;
             return `Envoyé • ${time}`;
         } else {
-            if (chat.lastMessage.type === 'image') return `Photo reçue • ${time}`;
-            if (chat.lastMessage.type === 'audio') return `Vocal reçu • ${time}`;
-            return chat.lastMessage.read ? `Reçu • ${time}` : `Nouveau message • ${time}`;
+            if (chat.lastMessageType === 'image') return `Photo reçue • ${time}`;
+            if (chat.lastMessageType === 'audio') return `Vocal reçu • ${time}`;
+            return chat.lastMessageRead ? `Reçu • ${time}` : `Nouveau message • ${time}`;
         }
     };
 
@@ -230,7 +206,7 @@ export default function ChatListPage() {
                                         <div className="w-14 h-14 rounded-full bg-[#FFFC00] border-2 border-black flex items-center justify-center">
                                             <User className="w-7 h-7 text-black fill-black" />
                                         </div>
-                                        {chat.lastMessage.senderId !== user?.uid && !chat.lastMessage.read && (
+                                        {chat.lastMessageSenderId !== user?.uid && !chat.lastMessageRead && (
                                             <div className="absolute -top-1 -right-1 w-5 h-5 bg-[#FF0049] rounded-full border-2 border-white flex items-center justify-center animate-bounce">
                                                 <div className="w-2 h-2 bg-white rounded-full" />
                                             </div>
@@ -324,6 +300,15 @@ export default function ChatListPage() {
                     </div>
                 )}
             </div>
+
+            {/* Notification Toast */}
+            <NotificationToast
+                show={toastData.show}
+                title={toastData.title}
+                body={toastData.body}
+                senderId={toastData.senderId}
+                onClose={closeToast}
+            />
         </ProtectedRoute>
     );
 }

@@ -3,6 +3,7 @@
 import { prisma } from '@/lib/prisma'
 import { revalidatePath, unstable_noStore as noStore } from 'next/cache'
 import { adminMessaging, adminDb } from '@/lib/firebase-admin'
+import { getIO } from '@/lib/socket-io'
 
 export async function sendMessage(data: {
     content: string
@@ -72,24 +73,38 @@ export async function sendMessage(data: {
                 const senderDisplay = sender?.username || sender?.email?.split('@')[0] || "Messagis";
                 console.log("Sending push notification via adminMessaging...");
 
+                let notificationBody = 'Nouveau message reçu 👻';
+                if (data.type === 'text') {
+                    notificationBody = data.content.length > 100 ? data.content.substring(0, 97) + '...' : data.content;
+                } else if (data.type === 'image') {
+                    notificationBody = '📷 Une photo a été partagée';
+                } else if (data.type === 'audio') {
+                    notificationBody = '🎵 Message vocal reçu';
+                }
+
                 const response = await adminMessaging.send({
                     token: recipient.fcmToken,
                     notification: {
                         title: senderDisplay,
-                        body: 'Nouveau message reçu 👻',
+                        body: notificationBody,
                     },
                     data: {
                         senderId: data.senderId,
                         type: data.type,
-                        click_action: `/chat?uid=${data.senderId}`
+                        click_action: `/chat?uid=${data.senderId}`,
+                        tag: `msg-${data.senderId}` // Group notifications by sender
                     },
                     android: {
-                        priority: 'high'
+                        priority: 'high',
+                        notification: {
+                            tag: `msg-${data.senderId}`
+                        }
                     },
                     apns: {
                         payload: {
                             aps: {
-                                sound: 'default'
+                                sound: 'default',
+                                threadId: `msg-${data.senderId}` // Support threading on iOS
                             }
                         }
                     }
@@ -102,13 +117,24 @@ export async function sendMessage(data: {
             console.error('Error sending push notification:', pushError);
             // Don't fail the message if push fails
         }
-        // -----------------------------
+
+        // -- Socket.io Signaling --
+        try {
+            const io = getIO();
+            if (io) {
+                io.to(data.receiverId).emit('new_message', message);
+                io.to(data.senderId).emit('new_message', message);
+                console.log("Socket.io signal sent for message:", message.id);
+            }
+        } catch (socketError) {
+            console.error('Error sending socket signal:', socketError);
+        }
 
         revalidatePath('/chat')
         return { success: true, message }
-    } catch (error) {
+    } catch (error: any) {
         console.error('Error saving message to Prisma:', error)
-        return { success: false, error }
+        return { success: false, error: error.message || String(error) }
     }
 }
 
@@ -140,9 +166,9 @@ export async function getMessages(currentUserId: string, otherUserId: string) {
             }
         })
         return { success: true, messages }
-    } catch (error) {
+    } catch (error: any) {
         console.error('Error fetching messages from Prisma:', error)
-        return { success: false, error }
+        return { success: false, error: error.message || String(error) }
     }
 }
 
@@ -214,9 +240,9 @@ export async function getRecentChats(currentUserId: string) {
             });
 
         return { success: true, chats };
-    } catch (error) {
+    } catch (error: any) {
         console.error('Error fetching recent chats:', error);
-        return { success: false, error };
+        return { success: false, error: error.message || String(error) };
     }
 }
 
