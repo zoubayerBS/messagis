@@ -97,27 +97,26 @@ export async function sendMessage(data: {
 
                 const response = await adminMessaging.send({
                     token: recipient.fcmToken,
-                    notification: {
+                    // We REMOVE the 'notification' key so the browser doesn't auto-show it.
+                    // Instead, we pass everything in 'data' for the Service Worker to handle.
+                    data: {
                         title: senderDisplay,
                         body: notificationBody,
-                    },
-                    data: {
                         senderId: data.senderId,
                         type: data.type,
                         click_action: `/chat?uid=${data.senderId}`,
-                        tag: `msg-${data.senderId}` // Group notifications by sender
+                        tag: `msg-${data.senderId}`
                     },
                     android: {
                         priority: 'high',
-                        notification: {
-                            tag: `msg-${data.senderId}`
-                        }
+                        // Notification key removed here too
                     },
                     apns: {
                         payload: {
                             aps: {
+                                'content-available': 1, // Silent push for iOS equivalent
                                 sound: 'default',
-                                threadId: `msg-${data.senderId}` // Support threading on iOS
+                                threadId: `msg-${data.senderId}`
                             }
                         }
                     }

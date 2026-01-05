@@ -17,33 +17,43 @@ const messaging = firebase.messaging();
 messaging.onBackgroundMessage((payload) => {
     console.log('[firebase-messaging-sw.js] Received background message ', payload);
 
-    const notificationTitle = payload.notification?.title || "Nouveau message";
-    const senderId = payload.data?.senderId;
-    const clickAction = payload.data?.click_action || '/chat';
-
-    const notificationOptions = {
-        body: payload.notification?.body || "Vous avez reçu un nouveau message sur Messagis.",
-        icon: '/icons/icon-192x192.png',
-        badge: '/icons/icon-192x192.png',
-        data: payload.data,
-        vibrate: [200, 100, 200],
-        tag: payload.data?.tag || 'messagis-notification',
-        renotify: true, // Renotify if same tag
-        requireInteraction: true,
-        actions: [
-            {
-                action: 'reply',
-                title: 'Répondre ✍️',
-                icon: '/icons/reply-icon.png' // Optional: if exists
-            },
-            {
-                action: 'open',
-                title: 'Ouvrir Messagis ✨'
+    // Check if window is focused
+    return self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clientList) => {
+        for (const client of clientList) {
+            if (client.url.includes(self.location.origin) && 'focus' in client && client.visibilityState === 'visible') {
+                console.log('[firebase-messaging-sw.js] App is focused, suppressing notification.');
+                return; // Do nothing, let the in-app toast handle it
             }
-        ]
-    };
+        }
 
-    return self.registration.showNotification(notificationTitle, notificationOptions);
+        // If not focused, show notification from data payload
+        const notificationTitle = payload.data?.title || payload.notification?.title || "Nouveau message";
+        const notificationBody = payload.data?.body || payload.notification?.body || "Vous avez reçu un nouveau message.";
+
+        const notificationOptions = {
+            body: notificationBody,
+            icon: '/icons/icon-192x192.png',
+            badge: '/icons/icon-192x192.png',
+            data: payload.data, // Keep the data available for click handling
+            vibrate: [200, 100, 200],
+            tag: payload.data?.tag || 'messagis-notification',
+            renotify: true,
+            requireInteraction: true,
+            actions: [
+                {
+                    action: 'reply',
+                    title: 'Répondre ✍️',
+                    icon: '/icons/reply-icon.png'
+                },
+                {
+                    action: 'open',
+                    title: 'Ouvrir Messagis ✨'
+                }
+            ]
+        };
+
+        return self.registration.showNotification(notificationTitle, notificationOptions);
+    });
 });
 
 self.addEventListener('notificationclick', (event) => {
